@@ -6293,6 +6293,508 @@ class UnidotCamera:
 		return outdict
 
 
+class UnidotParticleSystem:
+	extends UnidotBehaviour
+	# Unity ParticleSystem → GPUParticles3D + ParticleProcessMaterial. The modules Godot can express
+	# are applied to the material/node; every module's authored values are also stored in the
+	# `udon_particles` metadata ({module: {property: value}}) so converted scripts read them back
+	# (udon_runtime `U.ps_get`). MinMaxCurve values are a float (constant) or a Dictionary
+	# {mode, constant(Min/Max), curve(Min/Max), multiplier}; MinMaxGradient a Color or
+	# {mode, color(Min/Max), gradient(Min/Max)} — the runtime's representation.
+
+	func get_godot_type() -> String:
+		return "GPUParticles3D"
+
+	static func curve_from(d: Variant) -> Curve:
+		if not (d is Dictionary):
+			return null
+		var c := Curve.new()
+		var pts: Array = d.get("m_Curve", [])
+		var lo: float = INF
+		var hi: float = -INF
+		for k in pts:
+			if k is Dictionary:
+				lo = minf(lo, float(k.get("value", 0.0)))
+				hi = maxf(hi, float(k.get("value", 0.0)))
+		if pts.is_empty():
+			lo = 0.0
+			hi = 1.0
+		c.min_value = minf(lo, 0.0)
+		c.max_value = maxf(hi, 1.0)
+		for k in pts:
+			if k is Dictionary:
+				c.add_point(Vector2(float(k.get("time", 0.0)), float(k.get("value", 0.0))), float(k.get("inSlope", 0.0)), float(k.get("outSlope", 0.0)))
+		return c
+
+	## MinMaxCurve YAML → runtime value (float or Dictionary).
+	static func mmc_from(d: Variant, default: float = 0.0) -> Variant:
+		if d == null:
+			return default
+		if not (d is Dictionary):
+			return float(d)
+		var state: int = int(d.get("minMaxState", 0))
+		var scalar: float = float(d.get("scalar", default))
+		match state:
+			1:
+				return {"mode": 1, "multiplier": scalar, "curve": curve_from(d.get("maxCurve"))}
+			2:
+				return {"mode": 2, "multiplier": scalar, "curveMin": curve_from(d.get("minCurve")), "curveMax": curve_from(d.get("maxCurve"))}
+			3:
+				return {"mode": 3, "constantMin": float(d.get("minScalar", scalar)), "constantMax": scalar, "multiplier": 1.0}
+		return scalar
+
+	static func mmc_max(v: Variant) -> float:
+		if v is Dictionary:
+			match int(v.get("mode", 0)):
+				3:
+					return float(v.get("constantMax", 0.0))
+				1, 2:
+					return float(v.get("multiplier", 1.0))
+			return float(v.get("constant", 0.0))
+		return float(v) if v != null else 0.0
+
+	static func mmc_min(v: Variant) -> float:
+		if v is Dictionary:
+			match int(v.get("mode", 0)):
+				3:
+					return float(v.get("constantMin", 0.0))
+				1, 2:
+					return float(v.get("multiplier", 1.0))
+			return float(v.get("constant", 0.0))
+		return float(v) if v != null else 0.0
+
+	static func gradient_from(d: Variant) -> Gradient:
+		var g := Gradient.new()
+		if not (d is Dictionary):
+			return g
+		var nc: int = clampi(int(d.get("m_NumColorKeys", 2)), 1, 8)
+		var na: int = clampi(int(d.get("m_NumAlphaKeys", 2)), 1, 8)
+		var ct: Array = []
+		var cc: Array = []
+		for i in range(nc):
+			ct.append(float(d.get("ctime%d" % i, 0)) / 65535.0)
+			var col: Variant = d.get("key%d" % i, Color.WHITE)
+			cc.append(col if col is Color else Color.WHITE)
+		var at: Array = []
+		var aa: Array = []
+		for i in range(na):
+			at.append(float(d.get("atime%d" % i, 0)) / 65535.0)
+			var col: Variant = d.get("key%d" % i, Color.WHITE)
+			aa.append((col as Color).a if col is Color else 1.0)
+		var offsets: Array = []
+		for t in ct + at:
+			if not offsets.has(t):
+				offsets.append(t)
+		offsets.sort()
+		var offs := PackedFloat32Array()
+		var cols := PackedColorArray()
+		for t in offsets:
+			var c: Color = _interp_color(ct, cc, t)
+			c.a = _interp_alpha(at, aa, t)
+			offs.append(t)
+			cols.append(c)
+		g.offsets = offs
+		g.colors = cols
+		g.interpolation_mode = Gradient.GRADIENT_INTERPOLATE_CONSTANT if int(d.get("m_Mode", 0)) == 1 else Gradient.GRADIENT_INTERPOLATE_LINEAR
+		return g
+
+	static func _interp_color(times: Array, colors: Array, t: float) -> Color:
+		if times.is_empty():
+			return Color.WHITE
+		if t <= times[0]:
+			return colors[0]
+		for i in range(1, times.size()):
+			if t <= times[i]:
+				var span: float = times[i] - times[i - 1]
+				var f: float = 0.0 if span <= 0.0 else (t - times[i - 1]) / span
+				return (colors[i - 1] as Color).lerp(colors[i], f)
+		return colors[times.size() - 1]
+
+	static func _interp_alpha(times: Array, alphas: Array, t: float) -> float:
+		if times.is_empty():
+			return 1.0
+		if t <= times[0]:
+			return alphas[0]
+		for i in range(1, times.size()):
+			if t <= times[i]:
+				var span: float = times[i] - times[i - 1]
+				var f: float = 0.0 if span <= 0.0 else (t - times[i - 1]) / span
+				return lerpf(alphas[i - 1], alphas[i], f)
+		return alphas[times.size() - 1]
+
+	## MinMaxGradient YAML → runtime value (Color or Dictionary).
+	static func mmg_from(d: Variant) -> Variant:
+		if d == null:
+			return Color.WHITE
+		if d is Color:
+			return d
+		if not (d is Dictionary):
+			return Color.WHITE
+		var state: int = int(d.get("minMaxState", 0))
+		var maxc: Variant = d.get("maxColor", Color.WHITE)
+		var minc: Variant = d.get("minColor", Color.WHITE)
+		match state:
+			1, 4:
+				return {"mode": 1, "gradient": gradient_from(d.get("maxGradient"))}
+			2:
+				return {"mode": 2, "colorMin": minc if minc is Color else Color.WHITE, "colorMax": maxc if maxc is Color else Color.WHITE}
+			3:
+				return {"mode": 3, "gradientMin": gradient_from(d.get("minGradient")), "gradientMax": gradient_from(d.get("maxGradient"))}
+		return maxc if maxc is Color else Color.WHITE
+
+	static func mmg_gradient(v: Variant) -> Gradient:
+		if v is Dictionary:
+			match int(v.get("mode", 0)):
+				1:
+					return v.get("gradient")
+				3:
+					return v.get("gradientMax")
+				2:
+					var g := Gradient.new()
+					g.offsets = PackedFloat32Array([0.0, 1.0])
+					g.colors = PackedColorArray([v.get("colorMin", Color.WHITE), v.get("colorMax", Color.WHITE)])
+					return g
+		var flat := Gradient.new()
+		var c: Color = v if v is Color else Color.WHITE
+		flat.offsets = PackedFloat32Array([0.0, 1.0])
+		flat.colors = PackedColorArray([c, c])
+		return flat
+
+	static func shape_value(v: Variant, default: float) -> float:
+		# newer serializations wrap radius/arc as {value, mode, spread, speed}
+		if v is Dictionary:
+			return float(v.get("value", default))
+		if v == null:
+			return default
+		return float(v)
+
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
+		var p := GPUParticles3D.new()
+		p.name = "ParticleSystem"
+		state.add_child(p, new_parent, self)
+		var pm := ParticleProcessMaterial.new()
+		p.process_material = pm
+		var data: Dictionary = {}
+		var init: Dictionary = keys.get("InitialModule", {})
+		# --- main
+		var main: Dictionary = {}
+		var lifetime: Variant = mmc_from(init.get("startLifetime"), 5.0)
+		main["startLifetime"] = lifetime
+		p.lifetime = maxf(mmc_max(lifetime), 0.01)
+		pm.lifetime_randomness = clampf(1.0 - mmc_min(lifetime) / maxf(mmc_max(lifetime), 0.0001), 0.0, 1.0)
+		var speed: Variant = mmc_from(init.get("startSpeed"), 5.0)
+		main["startSpeed"] = speed
+		pm.initial_velocity_min = mmc_min(speed)
+		pm.initial_velocity_max = mmc_max(speed)
+		var size: Variant = mmc_from(init.get("startSize"), 1.0)
+		main["startSize"] = size
+		pm.scale_min = maxf(mmc_min(size), 0.0)
+		pm.scale_max = maxf(mmc_max(size), 0.0)
+		main["startSize3D"] = init.get("size3D", 0) != 0
+		main["startSizeY"] = mmc_from(init.get("startSizeY"), 1.0)
+		main["startSizeZ"] = mmc_from(init.get("startSizeZ"), 1.0)
+		var rot: Variant = mmc_from(init.get("startRotation"), 0.0)
+		main["startRotation"] = rot
+		pm.angle_min = rad_to_deg(mmc_min(rot))
+		pm.angle_max = rad_to_deg(mmc_max(rot))
+		var col: Variant = mmg_from(init.get("startColor"))
+		main["startColor"] = col
+		if col is Color:
+			pm.color = col
+		else:
+			var gt := GradientTexture1D.new()
+			gt.gradient = mmg_gradient(col)
+			pm.color_initial_ramp = gt
+		var grav: Variant = mmc_from(init.get("gravityModifier"), 0.0)
+		main["gravityModifier"] = grav
+		var gravity_vec := Vector3(0.0, -9.81 * mmc_max(grav), 0.0)
+		main["maxParticles"] = int(init.get("maxNumParticles", 1000))
+		main["duration"] = float(keys.get("lengthInSec", 5.0))
+		main["loop"] = keys.get("looping", 1) != 0
+		p.one_shot = not main["loop"]
+		main["prewarm"] = keys.get("prewarm", 0) != 0
+		if main["prewarm"]:
+			p.preprocess = p.lifetime
+		main["playOnAwake"] = keys.get("playOnAwake", 1) != 0
+		p.emitting = main["playOnAwake"]
+		p.set_meta("udon_play_on_awake", main["playOnAwake"])
+		main["simulationSpeed"] = float(keys.get("simulationSpeed", 1.0))
+		p.speed_scale = main["simulationSpeed"]
+		var space: int = int(keys.get("moveWithTransform", 1))
+		main["simulationSpace"] = 0 if space == 1 else (2 if space == 2 else 1)
+		p.local_coords = space == 1
+		main["startDelay"] = mmc_from(keys.get("startDelay"), 0.0)
+		main["scalingMode"] = int(keys.get("scalingMode", 0))
+		main["stopAction"] = int(keys.get("stopAction", 0))
+		main["cullingMode"] = int(keys.get("cullingMode", 0))
+		main["ringBufferMode"] = int(keys.get("ringBufferMode", 0))
+		main["useUnscaledTime"] = keys.get("useUnscaledTime", 0) != 0
+		main["emitterVelocityMode"] = int(keys.get("emitterVelocityMode", 0))
+		data["main"] = main
+		# --- emission
+		var em_src: Dictionary = keys.get("EmissionModule", {})
+		var emission: Dictionary = {"enabled": em_src.get("enabled", 1) != 0}
+		var rate: Variant = mmc_from(em_src.get("rateOverTime"), 10.0)
+		emission["rateOverTime"] = rate
+		emission["rateOverDistance"] = mmc_from(em_src.get("rateOverDistance"), 0.0)
+		var bursts: Array = []
+		var burst_total: int = 0
+		for b in em_src.get("m_Bursts", []):
+			if not (b is Dictionary):
+				continue
+			var count: Variant = mmc_from(b.get("countCurve"), float(b.get("maxCount", b.get("minCount", 30))))
+			bursts.append({"time": float(b.get("time", 0.0)), "count": count, "cycleCount": int(b.get("cycleCount", 1)), "repeatInterval": float(b.get("repeatInterval", 0.01)), "probability": float(b.get("probability", 1.0))})
+			burst_total += int(ceil(mmc_max(count)))
+		emission["bursts"] = bursts
+		var rate_max: float = mmc_max(rate)
+		var amount: int = 0
+		if rate_max > 0.0:
+			amount = int(ceil(rate_max * p.lifetime))
+		if burst_total > 0:
+			amount += burst_total
+			if rate_max <= 0.0:
+				p.explosiveness = 1.0
+		p.amount = clampi(amount, 1, maxi(int(main["maxParticles"]), 1))
+		if not emission["enabled"]:
+			p.emitting = false
+		data["emission"] = emission
+		# --- shape
+		var sh_src: Dictionary = keys.get("ShapeModule", {})
+		var shape: Dictionary = {"enabled": sh_src.get("enabled", 1) != 0}
+		var shape_type: int = int(sh_src.get("type", 4))
+		shape["shapeType"] = shape_type
+		var radius: float = shape_value(sh_src.get("radius"), 1.0)
+		shape["radius"] = radius
+		var thickness: float = float(sh_src.get("radiusThickness", 1.0))
+		shape["radiusThickness"] = thickness
+		shape["angle"] = float(sh_src.get("angle", 25.0))
+		shape["arc"] = shape_value(sh_src.get("arc"), 360.0)
+		shape["length"] = float(sh_src.get("length", 5.0))
+		var sc: Variant = sh_src.get("m_Scale", Vector3.ONE)
+		shape["scale"] = sc if sc is Vector3 else Vector3.ONE
+		var pos: Variant = sh_src.get("m_Position", Vector3.ZERO)
+		shape["position"] = pos if pos is Vector3 else Vector3.ZERO
+		var srot: Variant = sh_src.get("m_Rotation", Vector3.ZERO)
+		shape["rotation"] = srot if srot is Vector3 else Vector3.ZERO
+		shape["randomDirectionAmount"] = float(sh_src.get("randomDirectionAmount", 0.0))
+		shape["sphericalDirectionAmount"] = float(sh_src.get("sphericalDirectionAmount", 0.0))
+		shape["alignToDirection"] = sh_src.get("alignToDirection", 0) != 0
+		pm.emission_shape_offset = Vector3(-shape["position"].x, shape["position"].y, shape["position"].z)
+		if shape["enabled"]:
+			match shape_type:
+				0, 2:
+					pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE if thickness > 0.0 else ParticleProcessMaterial.EMISSION_SHAPE_SPHERE_SURFACE
+					pm.emission_sphere_radius = maxf(radius, 0.001)
+					pm.spread = 180.0
+				1, 3:
+					pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE_SURFACE
+					pm.emission_sphere_radius = maxf(radius, 0.001)
+					pm.spread = 180.0
+				4, 7, 8, 9, 10, 11, 17:
+					pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
+					pm.emission_ring_axis = Vector3(0, 0, 1)
+					pm.emission_ring_radius = maxf(radius, 0.001)
+					pm.emission_ring_inner_radius = maxf(radius, 0.001) * (1.0 - clampf(thickness, 0.0, 1.0))
+					pm.emission_ring_height = 0.0
+					pm.direction = Vector3(0, 0, 1)
+					pm.spread = shape["angle"] if shape_type in [4, 7, 8, 9] else 180.0
+				5, 15, 16, 18:
+					pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+					pm.emission_box_extents = (shape["scale"] as Vector3).abs() * 0.5
+					pm.direction = Vector3(0, 0, 1)
+					pm.spread = 0.0
+				_:
+					pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+					pm.emission_sphere_radius = maxf(radius, 0.001)
+					pm.spread = 180.0
+			if shape["randomDirectionAmount"] > 0.0:
+				pm.spread = lerpf(pm.spread, 180.0, clampf(shape["randomDirectionAmount"], 0.0, 1.0))
+		else:
+			pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_POINT
+			pm.direction = Vector3(0, 0, 1)
+			pm.spread = 0.0
+		data["shape"] = shape
+		# --- colour / size / rotation over lifetime
+		var cm: Dictionary = keys.get("ColorModule", {})
+		var col_over: Dictionary = {"enabled": cm.get("enabled", 0) != 0, "color": mmg_from(cm.get("gradient"))}
+		if col_over["enabled"]:
+			var gt := GradientTexture1D.new()
+			gt.gradient = mmg_gradient(col_over["color"])
+			pm.color_ramp = gt
+		data["colorOverLifetime"] = col_over
+		var sm: Dictionary = keys.get("SizeModule", {})
+		var size_over: Dictionary = {"enabled": sm.get("enabled", 0) != 0, "size": mmc_from(sm.get("curve"), 1.0), "separateAxes": sm.get("separateAxes", 0) != 0, "y": mmc_from(sm.get("y"), 1.0), "z": mmc_from(sm.get("z"), 1.0)}
+		if size_over["enabled"]:
+			var sv: Variant = size_over["size"]
+			var c: Curve = null
+			if sv is Dictionary:
+				c = sv.get("curve", sv.get("curveMax"))
+			if c != null:
+				var ct := CurveTexture.new()
+				ct.curve = c
+				pm.scale_curve = ct
+			else:
+				pm.scale_min *= mmc_max(sv)
+				pm.scale_max *= mmc_max(sv)
+		data["sizeOverLifetime"] = size_over
+		var rm: Dictionary = keys.get("RotationModule", {})
+		var rot_over: Dictionary = {"enabled": rm.get("enabled", 0) != 0, "z": mmc_from(rm.get("curve"), 0.0), "x": mmc_from(rm.get("x"), 0.0), "y": mmc_from(rm.get("y"), 0.0), "separateAxes": rm.get("separateAxes", 0) != 0}
+		if rot_over["enabled"]:
+			pm.angular_velocity_min = rad_to_deg(mmc_min(rot_over["z"]))
+			pm.angular_velocity_max = rad_to_deg(mmc_max(rot_over["z"]))
+		data["rotationOverLifetime"] = rot_over
+		# --- velocity / force / limit
+		var vm: Dictionary = keys.get("VelocityModule", {})
+		var vel: Dictionary = {"enabled": vm.get("enabled", 0) != 0, "x": mmc_from(vm.get("x"), 0.0), "y": mmc_from(vm.get("y"), 0.0), "z": mmc_from(vm.get("z"), 0.0), "speedModifier": mmc_from(vm.get("speedModifier"), 1.0), "radial": mmc_from(vm.get("radial"), 0.0), "orbitalX": mmc_from(vm.get("orbitalX"), 0.0), "orbitalY": mmc_from(vm.get("orbitalY"), 0.0), "orbitalZ": mmc_from(vm.get("orbitalZ"), 0.0), "space": int(vm.get("inWorldSpace", 0))}
+		if vel["enabled"]:
+			pm.initial_velocity_min *= mmc_min(vel["speedModifier"])
+			pm.initial_velocity_max *= mmc_max(vel["speedModifier"])
+			pm.radial_velocity_min = mmc_min(vel["radial"])
+			pm.radial_velocity_max = mmc_max(vel["radial"])
+		data["velocityOverLifetime"] = vel
+		var fm: Dictionary = keys.get("ForceModule", {})
+		var force: Dictionary = {"enabled": fm.get("enabled", 0) != 0, "x": mmc_from(fm.get("x"), 0.0), "y": mmc_from(fm.get("y"), 0.0), "z": mmc_from(fm.get("z"), 0.0), "space": int(fm.get("inWorldSpace", 0)), "randomized": fm.get("randomizePerFrame", 0) != 0}
+		if force["enabled"]:
+			gravity_vec += Vector3(-mmc_max(force["x"]), mmc_max(force["y"]), mmc_max(force["z"]))
+		pm.gravity = gravity_vec
+		data["forceOverLifetime"] = force
+		var cv: Dictionary = keys.get("ClampVelocityModule", {})
+		var limit: Dictionary = {"enabled": cv.get("enabled", 0) != 0, "limit": mmc_from(cv.get("magnitude"), 1.0), "dampen": float(cv.get("dampen", 0.0)), "drag": mmc_from(cv.get("drag"), 0.0), "separateAxes": cv.get("separateAxis", 0) != 0}
+		if limit["enabled"]:
+			var d: float = maxf(limit["dampen"] * 10.0, mmc_max(limit["drag"]))
+			pm.damping_min = d
+			pm.damping_max = d
+		data["limitVelocityOverLifetime"] = limit
+		# --- noise
+		var nm: Dictionary = keys.get("NoiseModule", {})
+		var noise: Dictionary = {"enabled": nm.get("enabled", 0) != 0, "strength": mmc_from(nm.get("strength"), 1.0), "frequency": float(nm.get("frequency", 0.5)), "scrollSpeed": mmc_from(nm.get("scrollSpeed"), 0.0), "damping": nm.get("damping", 1) != 0, "octaveCount": int(nm.get("octaves", 1)), "quality": int(nm.get("quality", 2)), "positionAmount": mmc_from(nm.get("positionAmount"), 1.0), "rotationAmount": mmc_from(nm.get("rotationAmount"), 0.0), "sizeAmount": mmc_from(nm.get("sizeAmount"), 0.0)}
+		if noise["enabled"]:
+			pm.turbulence_enabled = true
+			pm.turbulence_noise_strength = mmc_max(noise["strength"])
+			pm.turbulence_noise_scale = clampf(4.5 / maxf(noise["frequency"], 0.01), 0.1, 100.0)
+			pm.turbulence_noise_speed = Vector3.ONE * mmc_max(noise["scrollSpeed"])
+		data["noise"] = noise
+		# --- collision
+		var colm: Dictionary = keys.get("CollisionModule", {})
+		var collision: Dictionary = {"enabled": colm.get("enabled", 0) != 0, "type": int(colm.get("type", 0)), "mode": int(colm.get("collisionMode", 0)), "bounce": mmc_from(colm.get("m_Bounce"), 1.0), "dampen": mmc_from(colm.get("m_Dampen"), 0.0), "lifetimeLoss": mmc_from(colm.get("m_EnergyLossOnCollision"), 0.0), "minKillSpeed": float(colm.get("minKillSpeed", 0.0)), "maxKillSpeed": float(colm.get("maxKillSpeed", 10000.0)), "radiusScale": float(colm.get("radiusScale", 1.0)), "quality": int(colm.get("quality", 0)), "sendCollisionMessages": colm.get("collisionMessages", 0) != 0}
+		if collision["enabled"]:
+			pm.collision_mode = ParticleProcessMaterial.COLLISION_RIGID
+			pm.collision_bounce = mmc_max(collision["bounce"])
+			pm.collision_friction = mmc_max(collision["dampen"])
+		data["collision"] = collision
+		# --- texture sheet animation
+		var uv: Dictionary = keys.get("UVModule", {})
+		var sheet: Dictionary = {"enabled": uv.get("enabled", 0) != 0, "numTilesX": int(uv.get("tilesX", 1)), "numTilesY": int(uv.get("tilesY", 1)), "animation": int(uv.get("animationType", 0)), "mode": int(uv.get("mode", 0)), "timeMode": int(uv.get("timeMode", 0)), "fps": float(uv.get("fps", 30.0)), "cycleCount": int(uv.get("cycles", 1)), "rowIndex": int(uv.get("rowIndex", 0)), "rowMode": int(uv.get("rowMode", 1)), "frameOverTime": mmc_from(uv.get("frameOverTime"), 1.0), "startFrame": mmc_from(uv.get("startFrame"), 0.0)}
+		data["textureSheetAnimation"] = sheet
+		# --- trails
+		var tm: Dictionary = keys.get("TrailModule", {})
+		var trails: Dictionary = {"enabled": tm.get("enabled", 0) != 0, "mode": int(tm.get("mode", 0)), "ratio": float(tm.get("ratio", 1.0)), "lifetime": mmc_from(tm.get("lifetime"), 1.0), "minVertexDistance": float(tm.get("minVertexDistance", 0.2)), "textureMode": int(tm.get("textureMode", 0)), "worldSpace": tm.get("worldSpace", 0) != 0, "dieWithParticles": tm.get("dieWithParticles", 1) != 0, "sizeAffectsWidth": tm.get("sizeAffectsWidth", 1) != 0, "sizeAffectsLifetime": tm.get("sizeAffectsLifetime", 0) != 0, "inheritParticleColor": tm.get("inheritParticleColor", 1) != 0, "ribbonCount": int(tm.get("ribbonCount", 1)), "widthOverTrail": mmc_from(tm.get("widthOverTrail"), 1.0), "colorOverLifetime": mmg_from(tm.get("colorOverLifetime")), "colorOverTrail": mmg_from(tm.get("colorOverTrail"))}
+		if trails["enabled"]:
+			p.trail_enabled = true
+			p.trail_lifetime = maxf(mmc_max(trails["lifetime"]) * p.lifetime, 0.01)
+		data["trails"] = trails
+		# --- modules kept for scripts only
+		var lm: Dictionary = keys.get("LightsModule", {})
+		data["lights"] = {"enabled": lm.get("enabled", 0) != 0, "ratio": float(lm.get("ratio", 0.0)), "useRandomDistribution": lm.get("randomDistribution", 1) != 0, "useParticleColor": lm.get("color", 1) != 0, "sizeAffectsRange": lm.get("range", 1) != 0, "alphaAffectsIntensity": lm.get("intensity", 1) != 0, "rangeMultiplier": float(mmc_max(mmc_from(lm.get("rangeCurve"), 1.0))), "intensityMultiplier": float(mmc_max(mmc_from(lm.get("intensityCurve"), 1.0))), "maxLights": int(lm.get("maxLights", 20))}
+		var iv: Dictionary = keys.get("InheritVelocityModule", {})
+		data["inheritVelocity"] = {"enabled": iv.get("enabled", 0) != 0, "mode": int(iv.get("m_Mode", 0)), "curve": mmc_from(iv.get("m_Curve"), 0.0)}
+		var ef: Dictionary = keys.get("ExternalForcesModule", {})
+		data["externalForces"] = {"enabled": ef.get("enabled", 0) != 0, "multiplier": float(ef.get("multiplier", 1.0)), "multiplierCurve": mmc_from(ef.get("multiplierCurve"), 1.0), "influenceFilter": int(ef.get("influenceFilter", 0))}
+		var le: Dictionary = keys.get("LifetimeByEmitterSpeedModule", {})
+		data["lifetimeByEmitterSpeed"] = {"enabled": le.get("enabled", 0) != 0, "curve": mmc_from(le.get("m_Curve"), 1.0)}
+		var cbs: Dictionary = keys.get("ColorBySpeedModule", {})
+		data["colorBySpeed"] = {"enabled": cbs.get("enabled", 0) != 0, "color": mmg_from(cbs.get("gradient")), "range": cbs.get("range", Vector2(0, 1))}
+		var sbs: Dictionary = keys.get("SizeBySpeedModule", {})
+		data["sizeBySpeed"] = {"enabled": sbs.get("enabled", 0) != 0, "size": mmc_from(sbs.get("curve"), 1.0), "range": sbs.get("range", Vector2(0, 1)), "separateAxes": sbs.get("separateAxes", 0) != 0}
+		var rbs: Dictionary = keys.get("RotationBySpeedModule", {})
+		data["rotationBySpeed"] = {"enabled": rbs.get("enabled", 0) != 0, "z": mmc_from(rbs.get("curve"), 0.0), "range": rbs.get("range", Vector2(0, 1)), "separateAxes": rbs.get("separateAxes", 0) != 0}
+		var trg: Dictionary = keys.get("TriggerModule", {})
+		data["trigger"] = {"enabled": trg.get("enabled", 0) != 0, "inside": int(trg.get("inside", 1)), "outside": int(trg.get("outside", 0)), "enter": int(trg.get("enter", 0)), "exit": int(trg.get("exit", 0)), "radiusScale": float(trg.get("radiusScale", 1.0))}
+		var sub: Dictionary = keys.get("SubModule", {})
+		var sub_list: Array = []
+		for se in sub.get("subEmitters", []):
+			if se is Dictionary:
+				sub_list.append({"type": int(se.get("type", 0)), "properties": int(se.get("properties", 0)), "emitProbability": float(se.get("emitProbability", 1.0))})
+		data["subEmitters"] = {"enabled": sub.get("enabled", 0) != 0, "subEmittersCount": sub_list.size(), "entries": sub_list}
+		var cd: Dictionary = keys.get("CustomDataModule", {})
+		data["customData"] = {"enabled": cd.get("enabled", 0) != 0}
+		# --- renderer (sibling component)
+		var renderer: Dictionary = {}
+		var go: RefCounted = get_gameObject()
+		var rend: RefCounted = go.GetComponent("ParticleSystemRenderer") if go != null else null
+		var draw_mat: Material = null
+		var render_mode: int = 0
+		if rend != null:
+			var rk: Dictionary = rend.keys
+			render_mode = int(rk.get("m_RenderMode", 0))
+			renderer["renderMode"] = render_mode
+			renderer["sortMode"] = int(rk.get("m_SortMode", 0))
+			renderer["minParticleSize"] = float(rk.get("m_MinParticleSize", 0.0))
+			renderer["maxParticleSize"] = float(rk.get("m_MaxParticleSize", 0.5))
+			renderer["lengthScale"] = float(rk.get("m_LengthScale", 2.0))
+			renderer["velocityScale"] = float(rk.get("m_VelocityScale", 0.0))
+			renderer["cameraVelocityScale"] = float(rk.get("m_CameraVelocityScale", 0.0))
+			renderer["normalDirection"] = float(rk.get("m_NormalDirection", 1.0))
+			renderer["sortingFudge"] = float(rk.get("m_SortingFudge", 0.0))
+			renderer["alignment"] = int(rk.get("m_RenderAlignment", 0))
+			renderer["pivot"] = rk.get("m_Pivot", Vector3.ZERO)
+			renderer["flip"] = rk.get("m_Flip", Vector3.ZERO)
+			renderer["allowRoll"] = rk.get("m_AllowRoll", 1) != 0
+			renderer["enableGPUInstancing"] = rk.get("m_EnableGPUInstancing", 1) != 0
+			renderer["enabled"] = rk.get("m_Enabled", 1) != 0
+			p.visible = renderer["enabled"] and enabled
+			p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if int(rk.get("m_CastShadows", 0)) != 0 else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			var mats: Array = rk.get("m_Materials", [])
+			if not mats.is_empty() and mats[0] is Array and mats[0][1] != 0:
+				var m: Material = meta.get_godot_resource(mats[0])
+				if m != null:
+					draw_mat = m.duplicate()
+			var trail_mats: Array = mats.slice(1) if mats.size() > 1 else []
+			if not trail_mats.is_empty() and trail_mats[0] is Array and trail_mats[0][1] != 0:
+				var tmat: Material = meta.get_godot_resource(trail_mats[0])
+				if tmat != null:
+					renderer["trailMaterial"] = tmat
+			match renderer["sortMode"]:
+				1:
+					p.draw_order = GPUParticles3D.DRAW_ORDER_VIEW_DEPTH
+				2:
+					p.draw_order = GPUParticles3D.DRAW_ORDER_REVERSE_LIFETIME
+				3:
+					p.draw_order = GPUParticles3D.DRAW_ORDER_LIFETIME
+			if render_mode == 4:
+				var mesh_ref: Variant = rk.get("m_Mesh", [null, 0, "", 0])
+				if mesh_ref is Array and mesh_ref[1] != 0:
+					var mesh: Mesh = meta.get_godot_resource(mesh_ref)
+					if mesh != null:
+						p.draw_pass_1 = mesh
+		else:
+			p.visible = enabled
+		if draw_mat is BaseMaterial3D:
+			draw_mat.vertex_color_use_as_albedo = true
+			if render_mode == 3:
+				draw_mat.billboard_mode = BaseMaterial3D.BILLBOARD_FIXED_Y
+			elif render_mode == 4:
+				draw_mat.billboard_mode = BaseMaterial3D.BILLBOARD_DISABLED
+			else:
+				draw_mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+				draw_mat.billboard_keep_scale = true
+			if sheet["enabled"]:
+				draw_mat.particles_anim_h_frames = maxi(sheet["numTilesX"], 1)
+				draw_mat.particles_anim_v_frames = maxi(sheet["numTilesY"], 1)
+				draw_mat.particles_anim_loop = sheet["cycleCount"] != 1
+		if p.draw_pass_1 == null:
+			var quad := QuadMesh.new()
+			quad.size = Vector2(1, 1)
+			p.draw_pass_1 = quad
+		if draw_mat != null:
+			p.material_override = draw_mat
+		if draw_mat != null:
+			renderer["material"] = draw_mat
+		data["renderer"] = renderer
+		p.set_meta("udon_particles", data)
+		return p
+
+
 class UnidotLightProbeGroup:
 	extends UnidotComponent
 
@@ -7325,9 +7827,9 @@ var _type_dictionary: Dictionary = {
 	# "PackageManifestImporter": UnidotPackageManifestImporter,
 	# "PackedAssets": UnidotPackedAssets,
 	# "ParentConstraint": UnidotParentConstraint,
-	# "ParticleSystem": UnidotParticleSystem,
+	"ParticleSystem": UnidotParticleSystem,
 	# "ParticleSystemForceField": UnidotParticleSystemForceField,
-	# "ParticleSystemRenderer": UnidotParticleSystemRenderer,
+	"ParticleSystemRenderer": DiscardUnidotComponent,  # folded into UnidotParticleSystem
 	"PhysicMaterial": UnidotPhysicMaterial,
 	# "Physics2DSettings": UnidotPhysics2DSettings,
 	# "PhysicsManager": UnidotPhysicsManager,
