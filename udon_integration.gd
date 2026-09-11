@@ -146,10 +146,29 @@ func initialize_skelleys(_state: RefCounted, _objs: Array, _is_prefab: bool):
 func setup_post_children(game_object: RefCounted, state: RefCounted, node: Node, _avatar_meta: RefCounted):
 	if node == null:
 		return
+	if node.has_meta("udon_canvas") and str(node.get_meta("udon_canvas").get("mode", "")) == "world":
+		_finalize_world_canvas(node)
 	# Inactive GameObjects: unidot hides them; udon_runtime's SetActive/activeSelf use process_mode
 	# (no Start/Update/OnEnable until a script activates them), so mirror it here.
 	if "enabled" in game_object and not game_object.enabled:
 		node.process_mode = Node.PROCESS_MODE_DISABLED
+	# Unity layer → Godot collision bit (udon_runtime's LayerMask helpers use bit i for layer i);
+	# masks come from the project's layer collision matrix (udon/collision_matrix) or allow all,
+	# matching Unity's default of colliding with everything.
+	var layer: int = _to_int(game_object.keys.get("m_Layer", 0)) if "keys" in game_object else 0
+	var matrix: Variant = ProjectSettings.get_setting("udon/collision_matrix", PackedInt32Array())
+	var mask: int = 0xFFFFFFFF
+	if matrix is PackedInt32Array and layer < matrix.size():
+		mask = int(matrix[layer]) & 0xFFFFFFFF
+	var bodies: Array = []
+	if node is CollisionObject3D:
+		bodies.append(node)
+	for c in node.get_children():
+		if c is CollisionObject3D and (String(c.name).ends_with("Collider") or String(c.name) == "CharacterController"):
+			bodies.append(c)
+	for b in bodies:
+		b.collision_layer = 1 << clampi(layer, 0, 31)
+		b.collision_mask = mask
 	# Physics bodies scaled to (almost) zero — a Unity idiom for hiding — cannot be scaled in Godot;
 	# udon_runtime hides them instead and reports the original scale (see U.set_local_scale).
 	if node is CollisionObject3D:
@@ -866,8 +885,8 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 	var transform = go.transform
 	if transform == null or transform.type != "RectTransform":
 		return null
-	if go.GetComponent("Canvas") != null:
-		return null  # the Canvas GameObject stays a Node3D; see children_parent()
+	if go.GetComponent("Canvas") != null and not _inside_canvas(new_parent):
+		return null  # a top-level Canvas GameObject stays a Node3D; see children_parent()
 	var primary: String = ""
 	var kinds: Array = []
 	for component_ref in go.components:
@@ -924,10 +943,20 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 
 
 ## Children of a Canvas GameObject are built inside its SubViewport (world space) or CanvasLayer.
+## Is `n` inside a converted canvas (its viewport or layer)?
+func _inside_canvas(n: Node) -> bool:
+	var cur: Node = n
+	while cur != null:
+		if cur.has_meta("udon_canvas"):
+			return true
+		cur = cur.get_parent()
+	return false
+
+
 func children_parent(go: RefCounted, state: RefCounted, node: Node) -> Node:
 	var canvas = go.GetComponent("Canvas")
-	if canvas == null or node == null:
-		return null
+	if canvas == null or node == null or node is Control:
+		return null  # nested canvases are ordinary containers inside their parent's viewport
 	var keys: Dictionary = canvas.keys
 	var rt = go.transform
 	var size: Vector2 = Vector2(100, 100)
@@ -962,8 +991,14 @@ func children_parent(go: RefCounted, state: RefCounted, node: Node) -> Node:
 
 
 func _world_canvas(node: Node, size: Vector2, rt, state: RefCounted) -> Node:
-	var w: int = maxi(int(round(size.x)), 1)
-	var h: int = maxi(int(round(size.y)), 1)
+	# Canvas units are metres at scale 1 (the RectTransform scale converts pixel-style layouts);
+	# the viewport renders at `udon/canvas_pixels_per_metre` (default 1024) times the canvas scale.
+	var ppm: float = float(ProjectSettings.get_setting("udon/canvas_pixels_per_metre", 1024.0))
+	var gscale: Vector3 = node.global_transform.basis.get_scale() if node.is_inside_tree() else node.scale
+	var k: float = maxf(ppm * maxf(gscale.x, 1e-6), 0.01)
+	var units: Vector2 = Vector2(maxf(size.x, 1e-4), maxf(size.y, 1e-4))
+	var w: int = clampi(int(ceil(units.x * k)), 1, 8192)
+	var h: int = clampi(int(ceil(units.y * k)), 1, 8192)
 	var vp := SubViewport.new()
 	vp.name = "Viewport"
 	vp.size = Vector2i(w, h)
@@ -975,7 +1010,8 @@ func _world_canvas(node: Node, size: Vector2, rt, state: RefCounted) -> Node:
 	vp.owner = state.owner
 	var root := Control.new()
 	root.name = "Canvas"
-	root.size = Vector2(w, h)
+	root.size = units
+	root.scale = Vector2(k, k)
 	vp.add_child(root, true)
 	root.owner = state.owner
 	# Unity draws the canvas in the local XY plane, readable from its -Z side; the quad faces
@@ -986,9 +1022,10 @@ func _world_canvas(node: Node, size: Vector2, rt, state: RefCounted) -> Node:
 	var plane := MeshInstance3D.new()
 	plane.name = "CanvasPlane"
 	var quad := QuadMesh.new()
-	quad.size = Vector2(w, h)
+	quad.size = units
 	plane.mesh = quad
-	plane.transform = Transform3D(Basis.from_euler(Vector3(0.0, PI, 0.0)), Vector3(-(0.5 - pivot.x) * w, (0.5 - pivot.y) * h, 0.0))
+	var center := Vector3(-(0.5 - pivot.x) * units.x, (0.5 - pivot.y) * units.y, 0.0)
+	plane.transform = Transform3D(Basis.from_euler(Vector3(0.0, PI, 0.0)), center)
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -996,9 +1033,8 @@ func _world_canvas(node: Node, size: Vector2, rt, state: RefCounted) -> Node:
 	plane.material_override = mat
 	node.add_child(plane, true)
 	plane.owner = state.owner
-	# udon_runtime's canvas plane script binds the viewport texture at runtime (a ViewportTexture
-	# resource cannot be validated while the scene is being built); without the runtime, fall
-	# back to a ViewportTexture.
+	# udon_runtime's canvas plane script binds the viewport texture, refits the viewport to the
+	# UI's real bounds and handles canvases nested inside other canvases at runtime.
 	if ResourceLoader.exists("res://addons/udon_runtime/udon_canvas_plane.gd"):
 		plane.set_script(load("res://addons/udon_runtime/udon_canvas_plane.gd"))
 		plane.set("viewport_path", plane.get_path_to(vp))
@@ -1006,12 +1042,11 @@ func _world_canvas(node: Node, size: Vector2, rt, state: RefCounted) -> Node:
 		var vt := ViewportTexture.new()
 		vt.viewport_path = state.owner.get_path_to(vp)
 		mat.albedo_texture = vt
-	# interaction volume for pointer/laser input (udon_runtime maps hits to viewport coordinates)
 	var area := Area3D.new()
 	area.name = "UiShape"
 	var shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(w, h, 0.01)
+	box.size = Vector3(units.x, units.y, 0.01)
 	shape.shape = box
 	area.add_child(shape, true)
 	area.transform = plane.transform
@@ -1019,8 +1054,82 @@ func _world_canvas(node: Node, size: Vector2, rt, state: RefCounted) -> Node:
 	area.owner = state.owner
 	shape.owner = state.owner
 	area.add_to_group("udon_ui_shape", true)
-	node.set_meta("udon_canvas", {"mode": "world", "viewport": node.get_path_to(vp), "root": node.get_path_to(root), "plane": node.get_path_to(plane), "size": Vector2(w, h)})
+	if rt != null:
+		_store_rect_meta(node, rt.keys)
+	node.set_meta("udon_canvas", {"mode": "world", "viewport": node.get_path_to(vp), "root": node.get_path_to(root), "plane": node.get_path_to(plane), "size": units, "k": k, "pivot": pivot, "offset": Vector2.ZERO, "plane_center": center})
 	return root
+
+
+func _store_rect_meta(node: Node, keys: Dictionary) -> void:
+	var amin: Vector2 = keys.get("m_AnchorMin") if keys.get("m_AnchorMin") is Vector2 else Vector2(0.5, 0.5)
+	var amax: Vector2 = keys.get("m_AnchorMax") if keys.get("m_AnchorMax") is Vector2 else Vector2(0.5, 0.5)
+	var ap: Vector2 = keys.get("m_AnchoredPosition") if keys.get("m_AnchoredPosition") is Vector2 else Vector2.ZERO
+	var sd: Vector2 = keys.get("m_SizeDelta") if keys.get("m_SizeDelta") is Vector2 else Vector2.ZERO
+	var pv: Vector2 = keys.get("m_Pivot") if keys.get("m_Pivot") is Vector2 else Vector2(0.5, 0.5)
+	var sc: Vector2 = Vector2.ONE
+	if keys.get("m_LocalScale") is Vector3:
+		sc = Vector2(keys["m_LocalScale"].x, keys["m_LocalScale"].y)
+	node.set_meta("udon_rect", {"anchor_min": amin, "anchor_max": amax, "anchored_position": ap, "size_delta": sd, "pivot": pv, "scale": sc})
+
+
+## Unity world canvases do not clip: children may extend far beyond the canvas rect (a 1×1 root
+## with 300×100 menus is common). Once the UI tree exists, size the viewport to the union of the
+## child rects and move the plane so the canvas keeps its world placement.
+func _finalize_world_canvas(node: Node) -> void:
+	var cfg: Dictionary = node.get_meta("udon_canvas")
+	var vp: SubViewport = node.get_node_or_null(cfg.get("viewport", NodePath()))
+	var root: Control = node.get_node_or_null(cfg.get("root", NodePath()))
+	var plane: MeshInstance3D = node.get_node_or_null(cfg.get("plane", NodePath()))
+	var area: Area3D = node.get_node_or_null(NodePath("UiShape"))
+	if vp == null or root == null or plane == null:
+		return
+	var k: float = float(cfg.get("k", 1.0))
+	var rsize: Vector2 = cfg.get("size", root.size)
+	var union: Rect2 = Rect2(Vector2.ZERO, rsize)
+	for c in root.get_children():
+		union = union.merge(_control_bounds(c, rsize, Vector2.ZERO))
+	var w: int = clampi(int(ceil(union.size.x * k)), 1, 8192)
+	var h: int = clampi(int(ceil(union.size.y * k)), 1, 8192)
+	vp.size = Vector2i(w, h)
+	root.position = -union.position * k
+	var pv: Vector2 = cfg.get("pivot", Vector2(0.5, 0.5))
+	var center: Vector3 = Vector3(pv.x * rsize.x - union.position.x - union.size.x * 0.5, (1.0 - pv.y) * rsize.y - union.position.y - union.size.y * 0.5, 0.0)
+	var quad: QuadMesh = plane.mesh as QuadMesh
+	if quad != null:
+		quad.size = union.size
+	plane.transform = Transform3D(Basis.from_euler(Vector3(0.0, PI, 0.0)), center)
+	if area != null:
+		area.transform = plane.transform
+		var shape: CollisionShape3D = area.get_node_or_null("CollisionShape3D")
+		if shape != null and shape.shape is BoxShape3D:
+			shape.shape.size = Vector3(union.size.x, union.size.y, 0.01)
+	cfg["plane_size"] = union.size
+	cfg["offset"] = union.position
+	cfg["plane_center"] = center
+	node.set_meta("udon_canvas", cfg)
+
+
+## Bounding rect of a converted control and its descendants in the coordinates of `parent_origin`
+## (its parent's top-left), from the anchor/offset values stored at import.
+func _control_bounds(c: Node, parent_size: Vector2, parent_origin: Vector2) -> Rect2:
+	if not (c is Control):
+		return Rect2(parent_origin, Vector2.ZERO)
+	var ctl: Control = c
+	var left: float = ctl.anchor_left * parent_size.x + ctl.offset_left
+	var right: float = ctl.anchor_right * parent_size.x + ctl.offset_right
+	var top: float = ctl.anchor_top * parent_size.y + ctl.offset_top
+	var bottom: float = ctl.anchor_bottom * parent_size.y + ctl.offset_bottom
+	var size: Vector2 = Vector2(maxf(right - left, 0.0), maxf(bottom - top, 0.0))
+	var origin: Vector2 = parent_origin + Vector2(left, top)
+	var r: Rect2 = Rect2(origin, size)
+	if not ctl.scale.is_equal_approx(Vector2.ONE):
+		var pivot: Vector2 = Vector2(ctl.pivot_offset)
+		var s: Vector2 = ctl.scale.abs()
+		r = Rect2(origin + pivot - pivot * s, size * s)
+	for ch in ctl.get_children():
+		if ch is Control:
+			r = r.merge(_control_bounds(ch, size, origin))
+	return r
 
 
 ## RectTransform → Control anchors/offsets (Unity Y-up, Godot Y-down).
@@ -1045,6 +1154,7 @@ func _configure_rect(node: Control, keys: Dictionary, go: RefCounted) -> void:
 	var sc = keys.get("m_LocalScale")
 	if sc is Vector3:
 		node.scale = Vector2(sc.x, sc.y)
+	node.pivot_offset = Vector2(pv.x * sd.x, (1.0 - pv.y) * sd.y)
 	node.set_meta("udon_rect", {"pivot": pv, "anchored_position": ap, "size_delta": sd})
 	node.set_meta("udon_pivot", pv)
 
