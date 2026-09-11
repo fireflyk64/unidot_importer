@@ -52,6 +52,8 @@ var orig_path_short: String
 var importer  # object_adapter.UnidotAssetImporter subclass
 # for .fbx, must use fileIDToRecycleName in meta.
 @export var internal_data: Dictionary = {}
+# ShaderLab summary of a .shader asset (see shaderlab.gd), read by materials that use it.
+@export var shader_info: Dictionary = {}
 
 @export var prefab_id_to_guid: Dictionary = {}  # int -> String: object_adapter.create_godot_node
 

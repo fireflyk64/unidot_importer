@@ -10,6 +10,7 @@ const convert_scene := preload("./convert_scene.gd")
 const raw_parsed_asset := preload("./raw_parsed_asset.gd")
 const bone_map_editor_plugin := preload("./bone_map_editor_plugin.gd")
 const unidot_utils_class = preload("./unidot_utils.gd")
+const shaderlab := preload("./shaderlab.gd")
 
 var unidot_utils = unidot_utils_class.new()
 
@@ -2487,6 +2488,29 @@ class TextHandler:
 		return false # Tells package dialog that this resource cannot be loaded so it shouldn't show an error
 
 
+class ShaderHandler:
+	extends AssetHandler
+	# ShaderLab sources are kept as text files; their render state summary goes on the asset meta
+	# (shader_info) at preprocess time so materials can use it whatever the import order.
+
+	func get_asset_type(pkgasset: Object):
+		return ASSET_TYPE_TEXTURE
+
+	func uses_godot_importer(pkgasset: Object) -> bool:
+		return false
+
+	func preprocess_asset(pkgasset: Object, tmpdir: String, thread_subdir: String, path: String, data_buf: PackedByteArray, unique_texture_map: Dictionary = {}) -> String:
+		if pkgasset.parsed_meta != null:
+			var info: Dictionary = shaderlab.parse(data_buf.get_string_from_utf8())
+			pkgasset.parsed_meta.shader_info = info
+			pkgasset.log_debug("shader " + str(info.get("name", "")) + ": lit=" + str(info.get("lit")) + " blend=" + str(info.get("blend")) + " tags=" + str(info.get("tags")))
+		return ""
+
+	func write_godot_asset(pkgasset: Object, temp_path: String) -> bool:
+		super.write_godot_asset(pkgasset, temp_path)
+		return false
+
+
 class DisabledHandler:
 	extends AssetHandler
 
@@ -2571,6 +2595,12 @@ var file_handlers: Dictionary = {
 	"anim": YamlHandler.new(),  # Animation... # TODO: This should be by type (.asset), not extension
 	# ALSO: animations can be contained inside other assets, such as controllers. we need to recognize this and extract them.
 	"default": DefaultHandler.new(),
+	"shader": ShaderHandler.new(),  # ShaderLab source: render state summary for material conversion
+	"cginc": TextHandler.new(),
+	"hlsl": TextHandler.new(),
+	"glslinc": TextHandler.new(),
+	"shadersubgraph": TextHandler.new(),
+	"shadergraph": TextHandler.new(),
 	"txt": TextHandler.new(),
 	"html": TextHandler.new(),
 	"htm": TextHandler.new(),

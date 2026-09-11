@@ -168,6 +168,9 @@ func pack_scene(pkgasset, is_prefab) -> PackedScene:
 				scene_contents.remove_child(dirlight)
 				dirlight = null
 			var sky_material: Variant = pkgasset.parsed_meta.get_godot_resource(asset.keys.get("m_SkyboxMaterial"))
+			if sky_material != null and not (sky_material is ProceduralSkyMaterial or sky_material is PanoramaSkyMaterial or sky_material is PhysicalSkyMaterial or sky_material is ShaderMaterial):
+				pkgasset.log_warn("Skybox material " + str(sky_material.resource_path) + " is not a sky material (custom skybox shader without a port); using a default sky", "m_SkyboxMaterial", asset.keys.get("m_SkyboxMaterial"))
+				sky_material = null
 			if sky_material == null and asset.keys.get("m_SkyboxMaterial")[1] != 0:
 				# Just use a default skybox for now...
 				sky_material = ProceduralSkyMaterial.new()

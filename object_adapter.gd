@@ -23,6 +23,7 @@ const anim_tree_runtime := preload("./runtime/anim_tree.gd")
 const human_trait = preload("./humanoid/human_trait.gd")
 const humanoid_transform_util = preload("./humanoid/transform_util.gd")
 const unidot_utils_class = preload("./unidot_utils.gd")
+const shaderlab := preload("./shaderlab.gd")
 
 var unidot_utils = unidot_utils_class.new()
 
@@ -322,6 +323,10 @@ class UnidotObject:
 		var current_materials: Array
 		current_materials.resize(len(mat_slots))
 		for i in range(len(mat_slots)):
+			if mat_slots[i] < 0 or mat_slots[i] >= len(current_materials_raw):
+				log_warn("Material slot " + str(mat_slots[i]) + " is outside the mesh's " + str(len(current_materials_raw)) + " surface(s)")
+				current_materials[i] = null
+				continue
 			current_materials[i] = current_materials_raw[mat_slots[i]]
 		for i in range(len(mat_slots), len(current_materials_raw)):
 			current_materials.append(current_materials_raw[i])
@@ -811,6 +816,116 @@ class UnidotMaterial:
 	func get_godot_type() -> String:
 		return "StandardMaterial3D"
 
+	func shader_ref() -> Array:
+		var r: Variant = keys.get("m_Shader", [null, 0, "", 0])
+		if typeof(r) == TYPE_ARRAY and r.size() == 4:
+			return r
+		return [null, 0, "", 0]
+
+	## Render-state summary of the material's shader: a built-in table entry, the parsed .shader
+	## asset (asset_meta.shader_info) or {} when the shader is not part of the package.
+	func shader_info() -> Dictionary:
+		var ref: Array = shader_ref()
+		if ref[1] == 0:
+			return {}
+		if str(ref[2]) == shaderlab.BUILTIN_GUID:
+			return shaderlab.builtin_info(int(ref[1]))
+		var smeta: Resource = meta.lookup_meta(ref)
+		if smeta != null and not smeta.shader_info.is_empty():
+			return smeta.shader_info
+		return {}
+
+	## A hand-written Godot shader replacing the Unity shader; "" when none is installed.
+	func find_shader_port(info: Dictionary) -> String:
+		return shaderlab.find_port(str(info.get("name", "")))
+
+	func create_port_material(port: String, texProperties: Dictionary, floatProperties: Dictionary, colorProperties: Dictionary) -> ShaderMaterial:
+		var shader: Shader = load(port)
+		if shader == null:
+			log_warn("Failed to load shader port " + port)
+			return null
+		var ret := ShaderMaterial.new()
+		ret.resource_name = self.name
+		ret.shader = shader
+		shaderlab.apply_port_uniforms(ret, texProperties, floatProperties, colorProperties, func(pname: String) -> Texture: return get_texture(texProperties, pname))
+		assign_object_meta(ret)
+		log_debug("Material uses shader port " + port)
+		return ret
+
+	func create_sky_material(kind: String, texProperties: Dictionary, floatProperties: Dictionary, colorProperties: Dictionary) -> Material:
+		var exposure: float = float(floatProperties.get("_Exposure", 1.0))
+		var rotation: float = float(floatProperties.get("_Rotation", 0.0))
+		var tint: Color = colorProperties.get("_Tint", Color(0.5, 0.5, 0.5, 1.0))
+		var scale := Color(tint.r * 2.0 * exposure, tint.g * 2.0 * exposure, tint.b * 2.0 * exposure, 1.0)
+		var needs_bake: bool = rotation != 0.0 or not scale.is_equal_approx(Color(1, 1, 1, 1))
+		var width: int = int(ProjectSettings.get_setting("unidot/sky_panorama_width", 2048))
+		match kind:
+			"Procedural":
+				var sky := shaderlab.procedural_sky(floatProperties, colorProperties)
+				sky.resource_name = self.name
+				assign_object_meta(sky)
+				return sky
+			"6 Sided":
+				var faces: Dictionary = {}
+				var names: Dictionary = {"+z": "_FrontTex", "-z": "_BackTex", "+x": "_LeftTex", "-x": "_RightTex", "+y": "_UpTex", "-y": "_DownTex"}
+				var count: int = 0
+				for k in names:
+					var img: Image = shaderlab._face_image(get_texture(texProperties, names[k]))
+					faces[k] = img
+					if img != null:
+						count += 1
+				if count == 0:
+					log_warn("6-sided skybox has no face textures")
+					return null
+				var pano := PanoramaSkyMaterial.new()
+				pano.panorama = shaderlab.texture_from_image(shaderlab.equirect_from_faces(faces, width, rotation, scale))
+				pano.resource_name = self.name
+				assign_object_meta(pano)
+				return pano
+			"Panoramic", "Cubemap":
+				var pname: String = "_MainTex" if kind == "Panoramic" else "_Tex"
+				var texref: Array = get_texture_ref(texProperties, pname)
+				var tex: Texture = null
+				var src_img: Image = null
+				if kind == "Cubemap":
+					# A Unity cubemap generated from a lat-long image: use the source image as the panorama.
+					var tmeta: Resource = meta.lookup_meta(texref) if texref.size() == 4 else null
+					if tmeta != null and not tmeta.path.is_empty():
+						src_img = Image.load_from_file("res://" + tmeta.path)
+						if src_img != null and src_img.get_width() < src_img.get_height() * 2 - 2:
+							log_warn("Skybox/Cubemap texture " + tmeta.path + " is not a lat-long image (" + str(src_img.get_size()) + "); cubemap layouts are not converted yet, using a default sky", pname, texref)
+							return null
+				else:
+					tex = get_texture(texProperties, pname)
+					if int(floatProperties.get("_Mapping", 1)) == 0:
+						log_warn("Skybox/Panoramic 6-frames layout is not converted; treating the texture as lat-long", pname, texref)
+				if tex == null and src_img == null:
+					log_warn("skybox texture missing", pname, texref)
+					return null
+				var pano := PanoramaSkyMaterial.new()
+				if src_img == null and not needs_bake and tex is Texture2D:
+					pano.panorama = tex
+				else:
+					if src_img == null:
+						src_img = shaderlab._face_image(tex)
+					if src_img == null:
+						log_warn("skybox texture image unavailable", pname, texref)
+						return null
+					if src_img.is_compressed():
+						src_img.decompress()
+					if shaderlab._is_float_format(src_img.get_format()):
+						if needs_bake:
+							log_warn("HDR skybox: _Rotation/_Exposure/_Tint are not applied to float images")
+						var it := ImageTexture.create_from_image(src_img)
+						pano.panorama = it
+					else:
+						src_img.convert(Image.FORMAT_RGBA8)
+						pano.panorama = shaderlab.texture_from_image(shaderlab.adjust_equirect(src_img, rotation, scale) if needs_bake else src_img)
+				pano.resource_name = self.name
+				assign_object_meta(pano)
+				return pano
+		return null
+
 	func create_godot_resource() -> Resource:  #Material:
 		#log_debug("keys: " + str(keys))
 		var kws = get_keywords()
@@ -820,6 +935,17 @@ class UnidotMaterial:
 		#log_debug(str(texProperties))
 		var colorProperties = get_color_properties()
 		#log_debug(str(colorProperties))
+		var info: Dictionary = shader_info()
+		var sky_kind: String = shaderlab.sky_kind(info, texProperties, floatProperties, colorProperties)
+		if sky_kind != "":
+			var sky: Material = create_sky_material(sky_kind, texProperties, floatProperties, colorProperties)
+			if sky != null:
+				return sky
+		var port: String = find_shader_port(info)
+		if port != "":
+			var ported: ShaderMaterial = create_port_material(port, texProperties, floatProperties, colorProperties)
+			if ported != null:
+				return ported
 		var ret = StandardMaterial3D.new()
 		ret.resource_name = self.name
 		# FIXME: Kinda hacky since transparent stuff doesn't always draw depth in Unidot
@@ -939,6 +1065,12 @@ class UnidotMaterial:
 		#if kws.get("_DETAIL_MULX2"):
 		#	ret.detail_enabled = true
 		#	ret.detail_blend_mode = BaseMaterial3D.BLEND_MODE_MUL
+		if not info.is_empty():
+			var applied: String = shaderlab.apply_render_state(ret, info, floatProperties, kws)
+			if not info.get("builtin", false):
+				log_warn("custom shader \"" + str(info.get("name", "")) + "\" has no Godot port (expected " + shaderlab.port_file_name(str(info.get("name", ""))) + " in unidot/shader_ports); approximated with StandardMaterial3D" + (" (" + applied + ")" if applied != "" else ""), "m_Shader", shader_ref())
+		elif shader_ref()[1] != 0 and str(shader_ref()[2]) != shaderlab.BUILTIN_GUID:
+			log_warn("shader " + str(shader_ref()[2]) + " is not in the package; converted as Standard", "m_Shader", shader_ref())
 		assign_object_meta(ret)
 		return ret
 
@@ -5291,6 +5423,9 @@ class UnidotMeshCollider:
 			source_mesh = source_mesh_instance.mesh
 		else:
 			source_mesh = meta.get_godot_resource(get_mesh(keys))
+		if source_mesh == null:
+			log_warn("MeshCollider has no mesh (missing MeshFilter mesh or m_Mesh); collider left empty", "m_Mesh", get_mesh(keys))
+			return null
 		if convex:
 			return source_mesh.create_convex_shape()
 		else:
@@ -5920,7 +6055,8 @@ class UnidotLight:
 			# depth_range? max_disatance? blend_splits? bias_split_scale?
 			#keys.get("m_ShadowNearPlane")
 			var dir_light: DirectionalLight3D = DirectionalLight3D.new()
-			dir_light.set_param(Light3D.PARAM_SHADOW_NORMAL_BIAS, shadowNormalBias)
+			# Unity's normal bias (default 0.4) and Godot's (default 2.0) are on different scales
+			dir_light.set_param(Light3D.PARAM_SHADOW_NORMAL_BIAS, shadowNormalBias * 5.0)
 			light = dir_light
 		elif src_light_type == 2:
 			var omni_light: OmniLight3D = OmniLight3D.new()
@@ -5945,7 +6081,8 @@ class UnidotLight:
 		light.set_param(Light3D.PARAM_ENERGY, intensity)
 		light.set_param(Light3D.PARAM_INDIRECT_ENERGY, bounceIntensity)
 		light.shadow_enabled = shadowType != 0
-		light.set_param(Light3D.PARAM_SHADOW_BIAS, shadowBias)
+		# Unity's default bias 0.05 corresponds to Godot's default 0.1
+		light.set_param(Light3D.PARAM_SHADOW_BIAS, shadowBias * 2.0)
 		if lightmapBakeType == 1:
 			light.light_bake_mode = Light3D.BAKE_DYNAMIC  # INDIRECT??
 		elif lightmapBakeType == 2:
@@ -6105,9 +6242,9 @@ class UnidotCamera:
 			viewport.size = Vector2(rendertex.keys.get("m_Width"), rendertex.keys.get("m_Height"))
 			if keys.get("m_AllowMSAA", 0) == 1:
 				if rendertex.keys.get("m_AntiAliasing", 0) == 1:
-					viewport.msaa = Viewport.MSAA_8X
+					viewport.msaa_3d = Viewport.MSAA_8X
 			viewport.use_occlusion_culling = keys.get("m_OcclusionCulling", 0)
-			viewport.clear_mode = (SubViewport.CLEAR_MODE_ALWAYS if keys.get("m_ClearFlags") < 3 else SubViewport.CLEAR_MODE_NEVER)
+			viewport.render_target_clear_mode = (SubViewport.CLEAR_MODE_ALWAYS if keys.get("m_ClearFlags") < 3 else SubViewport.CLEAR_MODE_NEVER)
 			# Godot is always HDR? if keys.get("m_AllowHDR", 0) == 1
 			par = viewport
 		var cam: Camera3D = Camera3D.new()

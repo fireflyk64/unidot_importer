@@ -531,7 +531,8 @@ func _meta_completed(tw: Object):
 				ignore_dependencies[pkgasset.guid] = true
 				_check_recursively(ti, false, false)
 		if importer_type == "[Shader]" or importer_type == "Shader":
-			if batch_import_types.get(".shader Shader", false) == false:
+			# ShaderLab sources are summarised for material conversion (asset_adapter.ShaderHandler)
+			if batch_import_types.get(".shader Shader", true) == false:
 				ignore_dependencies[pkgasset.guid] = true
 				_check_recursively(ti, false, false)
 		for guid in pkgasset.parsed_meta.dependency_guids:
