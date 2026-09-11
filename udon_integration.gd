@@ -46,6 +46,7 @@ const UI_COMPONENTS := {
 	"59f8146938fff824cb5fd77236b75775": "VerticalLayoutGroup",
 	"8a8695521f0d02e499659fee002a26c2": "GridLayoutGroup",
 	"3245ec927659c4140ac4f8d17403cc18": "ContentSizeFitter",
+	"e19747de3f5aca642ab2be37e372fb86": "Outline",
 	"76c392e42b5098c458856cdf6ecaaaa1": "EventSystem",
 	"4f231c4fb786f3946a6b90b886c48677": "StandaloneInputModule",
 	"f4688fdb7df04437aeb418b961361dc5": "TextMeshProUGUI",
@@ -124,7 +125,7 @@ func handle_monobehaviour(obj: RefCounted, state: RefCounted, node: Node, _exist
 	if kind == "":
 		_note_unknown(guid, obj, node)
 		return null
-	if UI_COMPONENTS.values().has(kind) or kind in ["VRCUrlInputField", "TMP_Dropdown", "VRC_UiShape"]:
+	if UI_COMPONENTS.values().has(kind) or kind in ["VRCUrlInputField", "TMP_Dropdown", "VRC_UiShape", "Shadow", "AspectRatioFitter"]:
 		_configure_ui_component(kind, obj, state, node)
 		return null
 	_mark_component(kind, obj, state, node)
@@ -666,6 +667,10 @@ func _identify_component(guid: String, keys: Dictionary) -> String:
 	if extra is Dictionary and extra.has(guid):
 		return str(extra[guid])
 	# field-signature fallback (works without the SDK sources)
+	if keys.has("m_EffectColor") and keys.has("m_EffectDistance"):
+		return "Shadow"
+	if keys.has("m_AspectMode") and keys.has("m_AspectRatio"):
+		return "AspectRatioFitter"
 	if keys.has("pickupable") and keys.has("AutoHold"):
 		return "VRC_Pickup"
 	if keys.has("PlayerMobility") and keys.has("disableStationExit"):
@@ -967,7 +972,7 @@ func children_parent(go: RefCounted, state: RefCounted, node: Node) -> Node:
 	var render_mode: int = _to_int(keys.get("m_RenderMode", 0))
 	var scaler = go.GetComponent("MonoBehaviour")
 	if render_mode == 2:
-		return _world_canvas(node, size, rt, state)
+		return _apply_canvas_group(node, _world_canvas(node, size, rt, state))
 	# screen space: a CanvasLayer with a root control sized to the reference resolution
 	var ref_size: Vector2 = Vector2(1920, 1080)
 	for component_ref in go.components:
@@ -987,6 +992,18 @@ func children_parent(go: RefCounted, state: RefCounted, node: Node) -> Node:
 	layer.add_child(root, true)
 	root.owner = state.owner
 	node.set_meta("udon_canvas", {"mode": "overlay", "root": node.get_path_to(root), "size": ref_size})
+	return _apply_canvas_group(node, root)
+
+
+## A CanvasGroup on a canvas GameObject is converted before the canvas root Control exists
+## (unidot's UnidotCanvasGroup leaves its settings on the container); apply them to the root.
+func _apply_canvas_group(container: Node, root: Node) -> Node:
+	if container != null and root is Control and container.has_meta("udon_canvas_group"):
+		var cfg: Dictionary = container.get_meta("udon_canvas_group")
+		root.modulate.a = clampf(float(cfg.get("alpha", 1.0)), 0.0, 1.0)
+		root.mouse_filter = Control.MOUSE_FILTER_STOP if bool(cfg.get("interactable", true)) and bool(cfg.get("blocksRaycasts", true)) else Control.MOUSE_FILTER_IGNORE
+		root.set_meta("udon_canvas_group", cfg)
+		container.remove_meta("udon_canvas_group")
 	return root
 
 
@@ -1223,7 +1240,44 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 			_queue_events(keys.get("m_OnValueChanged"), ctl, "item_selected", 1, state, obj)
 		"ScrollRect":
 			pass
-		"CanvasScaler", "GraphicRaycaster", "Mask", "RectMask2D", "LayoutElement", "HorizontalLayoutGroup", "VerticalLayoutGroup", "GridLayoutGroup", "ContentSizeFitter", "EventSystem", "StandaloneInputModule", "VRC_UiShape":
+		"Mask", "RectMask2D":
+			ctl.clip_contents = true
+			if kind == "Mask" and _to_int(keys.get("m_ShowMaskGraphic", 1)) == 0 and ctl is TextureRect:
+				ctl.self_modulate.a = 0.0
+		"LayoutElement":
+			if _to_int(keys.get("m_IgnoreLayout", 0)) == 0:
+				var mn := Vector2(maxf(float(keys.get("m_MinWidth", -1.0)), float(keys.get("m_PreferredWidth", -1.0))), maxf(float(keys.get("m_MinHeight", -1.0)), float(keys.get("m_PreferredHeight", -1.0))))
+				ctl.custom_minimum_size = Vector2(maxf(mn.x, 0.0), maxf(mn.y, 0.0))
+				if float(keys.get("m_FlexibleWidth", -1.0)) > 0.0:
+					ctl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				if float(keys.get("m_FlexibleHeight", -1.0)) > 0.0:
+					ctl.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		"Outline", "Shadow":
+			# Unity text effects → theme overrides on the text control (also read by U.ui_effect_*)
+			var ecol: Color = keys.get("m_EffectColor", Color(0, 0, 0, 0.5)) if keys.get("m_EffectColor") is Color else Color(0, 0, 0, 0.5)
+			var edist: Vector2 = keys.get("m_EffectDistance", Vector2(1, -1)) if keys.get("m_EffectDistance") is Vector2 else Vector2(1, -1)
+			var effect: String = "outline" if kind == "Outline" else "shadow"
+			ctl.set_meta("udon_effect_" + effect, {"effectColor": ecol, "effectDistance": edist, "useGraphicAlpha": _to_int(keys.get("m_UseGraphicAlpha", 1)) != 0, "enabled": _to_int(keys.get("m_Enabled", 1)) != 0})
+			if _to_int(keys.get("m_Enabled", 1)) != 0:
+				if kind == "Outline":
+					ctl.add_theme_color_override("font_outline_color", ecol)
+					ctl.add_theme_constant_override("outline_size", int(round(maxf(absf(edist.x), absf(edist.y)))))
+				else:
+					ctl.add_theme_color_override("font_shadow_color", ecol)
+					ctl.add_theme_constant_override("shadow_offset_x", int(round(edist.x)))
+					ctl.add_theme_constant_override("shadow_offset_y", int(round(-edist.y)))
+		"AspectRatioFitter":
+			var mode: int = _to_int(keys.get("m_AspectMode", 0))
+			var ratio: float = maxf(float(keys.get("m_AspectRatio", 1.0)), 0.001)
+			var props: Dictionary = ctl.get_meta("udon_props") if ctl.has_meta("udon_props") else {}
+			props["aspectMode"] = mode
+			props["aspectRatio"] = ratio
+			ctl.set_meta("udon_props", props)
+			if mode == 1:
+				ctl.size = Vector2(ctl.size.x, ctl.size.x / ratio)
+			elif mode == 2:
+				ctl.size = Vector2(ctl.size.y * ratio, ctl.size.y)
+		"CanvasScaler", "GraphicRaycaster", "HorizontalLayoutGroup", "VerticalLayoutGroup", "GridLayoutGroup", "ContentSizeFitter", "EventSystem", "StandaloneInputModule", "VRC_UiShape":
 			pass
 		_:
 			pass

@@ -6923,6 +6923,28 @@ class UnidotCanvasRenderer:
 		return null
 
 
+class UnidotCanvasGroup:
+	extends UnidotBehaviour
+	# Applies to the GameObject's Control: alpha → modulate, interactable/blocksRaycasts → mouse filter.
+
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
+		var target: Node = new_parent
+		if new_parent != null and new_parent.has_meta("udon_canvas"):
+			# world-space canvas: the GameObject is a container, its UI root is a Control
+			var cfg: Dictionary = new_parent.get_meta("udon_canvas")
+			var root: Node = new_parent.get_node_or_null(cfg.get("root", NodePath()))
+			if root != null:
+				target = root
+		if target is CanvasItem:
+			target.modulate.a = clampf(float(keys.get("m_Alpha", 1.0)), 0.0, 1.0)
+		if target is Control:
+			var interactable: bool = keys.get("m_Interactable", 1) != 0 and keys.get("m_BlocksRaycasts", 1) != 0
+			target.mouse_filter = Control.MOUSE_FILTER_STOP if interactable else Control.MOUSE_FILTER_IGNORE
+		if target != null:
+			target.set_meta("udon_canvas_group", {"alpha": float(keys.get("m_Alpha", 1.0)), "interactable": keys.get("m_Interactable", 1) != 0, "blocksRaycasts": keys.get("m_BlocksRaycasts", 1) != 0, "ignoreParentGroups": keys.get("m_IgnoreParentGroups", 0) != 0})
+		return null
+
+
 class UnidotMonoBehaviour:
 	extends UnidotBehaviour
 	var monoscript: Array:
@@ -7711,7 +7733,7 @@ var _type_dictionary: Dictionary = {
 	# "CachedSpriteAtlasRuntimeData": UnidotCachedSpriteAtlasRuntimeData,
 	"Camera": UnidotCamera,
 	"Canvas": UnidotCanvas,
-	# "CanvasGroup": UnidotCanvasGroup,
+	"CanvasGroup": UnidotCanvasGroup,
 	"CanvasRenderer": UnidotCanvasRenderer,
 	"CapsuleCollider": UnidotCapsuleCollider,
 	# "CapsuleCollider2D": UnidotCapsuleCollider2D,
