@@ -150,6 +150,14 @@ func setup_post_children(game_object: RefCounted, state: RefCounted, node: Node,
 	# (no Start/Update/OnEnable until a script activates them), so mirror it here.
 	if "enabled" in game_object and not game_object.enabled:
 		node.process_mode = Node.PROCESS_MODE_DISABLED
+	# Physics bodies scaled to (almost) zero — a Unity idiom for hiding — cannot be scaled in Godot;
+	# udon_runtime hides them instead and reports the original scale (see U.set_local_scale).
+	if node is CollisionObject3D:
+		var sc: Vector3 = node.scale
+		if absf(sc.x) < 1e-4 or absf(sc.y) < 1e-4 or absf(sc.z) < 1e-4:
+			node.set_meta("udon_zero_scale", Vector3.ZERO)
+			node.scale = Vector3.ONE
+			node.visible = false
 	if not node.has_meta("udon_behaviour"):
 		return
 	# An UdonBehaviour whose UdonSharp proxy component is missing (script not in the package):
