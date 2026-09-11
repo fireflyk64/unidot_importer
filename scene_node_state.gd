@@ -505,7 +505,7 @@ func duplicate() -> RefCounted:
 	return state
 
 
-func add_child(child: Node, new_parent: Node3D, obj: RefCounted):
+func add_child(child: Node, new_parent: Node, obj: RefCounted):
 	# meta. # FIXME???
 	if owner != null:
 		if new_parent == null:

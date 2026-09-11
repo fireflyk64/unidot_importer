@@ -119,12 +119,32 @@ func log_fail(local_ref: Array, msg: String, field: String = "", remote_ref: Arr
 		push_error("!UNIDOT! " + str(local_ref[2]) + ":" + str(local_ref[1]) + fieldstr + " : " + msg)
 
 
+## Extra importer plugins (scripts implementing the same hooks as vrm_integration.gd) listed in
+## the project setting `unidot/extra_plugins`, e.g. udon2godot's udon_integration.gd.
+var _extra_plugins: Array = []
+var _extra_plugins_loaded: bool = false
+
 func get_enabled_plugins() -> Array[RefCounted]:
+	var out: Array[RefCounted] = []
 	if vrm_spring_bones:
 		if vrm_integration_plugin == null:
 			vrm_integration_plugin = vrm_integration_class.new()
-		return [vrm_integration_plugin]
-	return []
+		out.append(vrm_integration_plugin)
+	if not _extra_plugins_loaded:
+		_extra_plugins_loaded = true
+		var paths: Variant = ProjectSettings.get_setting("unidot/extra_plugins", PackedStringArray())
+		for p in paths:
+			var scr = load(str(p))
+			if scr == null:
+				push_error("unidot: extra plugin not found: " + str(p))
+				continue
+			var inst = scr.new()
+			if inst.has_method("set_database"):
+				inst.set_database(self)
+			_extra_plugins.append(inst)
+	for p in _extra_plugins:
+		out.append(p)
+	return out
 
 
 func insert_meta(meta: Resource):  # asset_meta

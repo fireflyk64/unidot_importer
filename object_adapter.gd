@@ -194,7 +194,7 @@ class UnidotObject:
 		return null
 
 	# Belongs in UnidotComponent, but we haven't implemented all types yet.
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var new_node: Node = Node.new()
 		new_node.name = type
 		assign_object_meta(new_node)
@@ -3833,7 +3833,7 @@ class UnidotGameObject:
 	func get_godot_type() -> String:
 		return "Node3D"
 
-	func recurse_to_child_transform(state: RefCounted, child_transform: UnidotObject, new_parent: Node3D) -> Array:  # prefab_fileID,prefab_name,go_fileID,node
+	func recurse_to_child_transform(state: RefCounted, child_transform: UnidotObject, new_parent: Node) -> Array:  # prefab_fileID,prefab_name,go_fileID,node
 		if child_transform.type == "PrefabInstance":
 			# PrefabInstance child of stripped Transform part of another PrefabInstance
 			var prefab_instance: UnidotPrefabInstance = child_transform
@@ -4022,9 +4022,9 @@ class UnidotGameObject:
 			# If not found, we can't recreate the animationLibrary
 			obj.setup_post_children(animtree, sub_avatar_meta)
 
-	func create_godot_node(xstate: RefCounted, new_parent: Node3D) -> Node:  # -> Node3D:
+	func create_godot_node(xstate: RefCounted, new_parent: Node) -> Node:  # -> Node3D:
 		var state: Object = xstate
-		var ret: Node3D = null
+		var ret: Node = null
 		var components: Array = self.components
 		var has_collider: bool = false
 		var extra_fileID: Array = [self]
@@ -4068,6 +4068,15 @@ class UnidotGameObject:
 		var this_avatar_meta = sub_avatar_meta
 		if state.owner == null or ret == state.owner:
 			sub_avatar_meta = null
+		if ret == null:
+			# Plugins may stand in a different node type for the GameObject (e.g. a Control for a
+			# RectTransform). They add the node to `state` themselves and configure its transform.
+			for plugin in meta.get_enabled_plugins():
+				if plugin.has_method("create_gameobject_node"):
+					var pnode: Node = plugin.create_gameobject_node(self, state, new_parent)
+					if pnode != null:
+						ret = pnode
+						break
 		if ret == null:
 			ret = Node3D.new()
 			transform.configure_node(ret)
@@ -4124,9 +4133,17 @@ class UnidotGameObject:
 					smrs.append(smr)
 
 		var prefab_name_map = name_map.duplicate()
+		# Plugins may redirect child GameObjects under another node (e.g. a Canvas viewport).
+		var children_parent: Node = ret
+		for plugin in meta.get_enabled_plugins():
+			if plugin.has_method("children_parent"):
+				var cp: Node = plugin.children_parent(self, state, ret)
+				if cp != null:
+					children_parent = cp
+					break
 		for child_ref in transform.children_refs:
 			var child_transform: UnidotTransform = meta.lookup(child_ref)
-			var prefab_data: Array = recurse_to_child_transform(state, child_transform, ret)
+			var prefab_data: Array = recurse_to_child_transform(state, child_transform, children_parent)
 			if len(prefab_data) == 4:
 				name_map[prefab_data[1]] = prefab_data[2]
 				prefab_name_map[prefab_data[1]] = prefab_data[2]
@@ -4296,7 +4313,7 @@ class UnidotPrefabInstance:
 				return value
 		return source_prefab_meta.get_main_object_name()
 
-	func create_godot_node(xstate: RefCounted, new_parent: Node3D) -> Node:  # Node3D
+	func create_godot_node(xstate: RefCounted, new_parent: Node) -> Node:  # Node3D
 		# called from toplevel (scene, inherited prefab?)
 		var ret_data: Array = self.instantiate_prefab_node(xstate, new_parent)
 		if len(ret_data) < 4:
@@ -4304,7 +4321,7 @@ class UnidotPrefabInstance:
 		return ret_data[3]  # godot node.
 
 	# Generally, all transforms which are sub-objects of a prefab will be marked as such ("Create map from corresponding source object id (stripped id, PrefabInstanceId^target object id) and do so recursively, to target path...")
-	func instantiate_prefab_node(xstate: RefCounted, new_parent: Node3D) -> Array:  # [prefab_fileid, prefab_name, prefab_root_gameobject_id, godot_node]
+	func instantiate_prefab_node(xstate: RefCounted, new_parent: Node) -> Array:  # [prefab_fileid, prefab_name, prefab_root_gameobject_id, godot_node]
 		meta.prefab_id_to_guid[self.fileID] = self.source_prefab[2]  # UnidotRef[2] is guid
 		var state: RefCounted = xstate  # scene_node_state
 		var ps: RefCounted = state.prefab_state  # scene_node_state.PrefabState
@@ -4844,7 +4861,7 @@ class UnidotComponent:
 	func get_godot_type() -> String:
 		return "Node"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		if not meta.get_database().add_unsupported_components:
 			return null
 		var new_node: Node = Node.new()
@@ -4909,7 +4926,7 @@ class UnidotTransform:
 
 	var skeleton_bone_index: int = -1
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		return null
 
 	func convert_properties(node: Node, uprops: Dictionary) -> Dictionary:
@@ -5081,7 +5098,7 @@ class UnidotCollider:
 	func get_godot_type() -> String:
 		return "StaticBody3D"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var new_node: CollisionShape3D = CollisionShape3D.new()
 		log_debug("Creating collider at " + self.name + " type " + self.type + " parent name " + str(new_parent.name if new_parent != null else "NULL") + " path " + str(state.owner.get_path_to(new_parent) if new_parent != null else NodePath()) + " body name " + str(state.body.name if state.body != null else "NULL") + " path " + str(state.owner.get_path_to(state.body) if state.body != null else NodePath()))
 		new_node.shape = self.shape
@@ -5305,7 +5322,7 @@ class UnidotMeshCollider:
 class UnidotTerrainCollider:
 	extends UnidotMeshCollider
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var coll: Node3D = super.create_godot_node(state, new_parent)
 		return coll
 
@@ -5330,10 +5347,10 @@ class UnidotRigidbody:
 	func get_godot_type() -> String:
 		return "RigidBody3D"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		return null
 
-	func create_physics_body(state: RefCounted, new_parent: Node3D, name: String) -> Node:
+	func create_physics_body(state: RefCounted, new_parent: Node, name: String) -> Node:
 		var new_node: Node3D
 		var rigid: RigidBody3D = RigidBody3D.new()
 		rigid.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
@@ -5383,10 +5400,10 @@ class UnidotCharacterController:
 	func get_godot_type() -> String:
 		return "CharacterBody3D"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		return null
 
-	func create_physics_body(state: RefCounted, new_parent: Node3D, name: String) -> Node:
+	func create_physics_body(state: RefCounted, new_parent: Node, name: String) -> Node:
 		var character: CharacterBody3D = CharacterBody3D.new()
 		character.name = name  # Not type: This replaces the usual transform node.
 		state.add_child(character, new_parent, self)
@@ -5440,7 +5457,7 @@ class UnidotCharacterController:
 class UnidotMeshFilter:
 	extends UnidotComponent
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		return null
 
 	func convert_properties(node: Node, uprops: Dictionary) -> Dictionary:
@@ -5526,10 +5543,10 @@ class UnidotMeshRenderer:
 	func get_godot_type() -> String:
 		return "MeshInstance3D"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		return create_godot_node_orig(state, new_parent, type)
 
-	func create_godot_node_orig(state: RefCounted, new_parent: Node3D, component_name: String) -> Node:
+	func create_godot_node_orig(state: RefCounted, new_parent: Node, component_name: String) -> Node:
 		var new_node: MeshInstance3D = MeshInstance3D.new()
 		new_node.name = component_name
 		state.add_child(new_node, new_parent, self)
@@ -5572,7 +5589,7 @@ class UnidotSkinnedMeshRenderer:
 
 	const ENABLE_CLOTH := false
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		if len(bones) == 0:
 			var cloth: UnidotCloth = gameObject.GetComponent("Cloth")
 			if cloth != null:
@@ -5581,7 +5598,7 @@ class UnidotSkinnedMeshRenderer:
 		else:
 			return null
 
-	func create_cloth_godot_node(state: RefCounted, new_parent: Node3D, component_name: String, cloth: UnidotCloth) -> Node:
+	func create_cloth_godot_node(state: RefCounted, new_parent: Node, component_name: String, cloth: UnidotCloth) -> Node:
 		if not ENABLE_CLOTH:
 			return create_godot_node_orig(state, new_parent, component_name)
 		var new_node: MeshInstance3D = cloth.create_cloth_godot_node(state, new_parent, component_name, self, self.get_mesh(), null, [])
@@ -5707,7 +5724,7 @@ class UnidotSkinnedMeshRenderer:
 class UnidotCloth:
 	extends UnidotBehaviour
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		return null
 
 	func get_bone_transform(skel: Skeleton3D, bone_idx: int) -> Transform3D:
@@ -5733,7 +5750,7 @@ class UnidotCloth:
 		else:
 			return ret
 
-	func create_cloth_godot_node(state: RefCounted, new_parent: Node3D, component_name: String, smr: UnidotObject, mesh: Array, skel: Skeleton3D, bones: Array) -> SoftBody3D:
+	func create_cloth_godot_node(state: RefCounted, new_parent: Node, component_name: String, smr: UnidotObject, mesh: Array, skel: Skeleton3D, bones: Array) -> SoftBody3D:
 		var new_node: SoftBody3D = SoftBody3D.new()
 		new_node.name = component_name
 		state.add_child(new_node, new_parent, smr)
@@ -5866,7 +5883,7 @@ class UnidotLight:
 	func get_godot_type() -> String:
 		return "Light3D"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var light: Light3D
 		# TODO: Change Light to use set() and convert_properties system
 		var src_light_type = lightType
@@ -5987,7 +6004,7 @@ class UnidotAudioSource:
 	func get_godot_type() -> String:
 		return "AudioStreamPlayer3D"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var audio: Node = null
 		var panlevel_curve: Dictionary = keys.get("panLevelCustomCurve", {})
 		var curves: Array = panlevel_curve.get("m_Curve", [])
@@ -6056,7 +6073,7 @@ class UnidotCamera:
 	func get_godot_type() -> String:
 		return "Camera3D"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var par: Node = new_parent
 		var texref: Array = keys.get("m_TargetTexture", [null, 0, null, null])
 		var rendertex: UnidotObject = null
@@ -6127,7 +6144,7 @@ class UnidotLightProbeGroup:
 	func get_godot_type() -> String:
 		return "LightmapProbe"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var i = 0
 		var probe_positions: PackedVector3Array
 		for pos in keys.get("m_SourcePositions", []):
@@ -6152,7 +6169,7 @@ class UnidotReflectionProbe:
 	func get_godot_type() -> String:
 		return "ReflectionProbe"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var probe: ReflectionProbe = ReflectionProbe.new()
 		probe.name = "ReflectionProbe"
 		# UPDATE_ALWAYS can crash Godot if multiple probes "see" each other
@@ -6207,7 +6224,7 @@ class UnidotTerrain:
 	func get_godot_type() -> String:
 		return "MultiMeshInstance3D"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		#var terrain: MeshInstance3D = MeshInstance3D.new()
 		#terrain.name = "Terrain"
 		#assign_object_meta(terrain)
@@ -6230,6 +6247,25 @@ class UnidotTerrain:
 		return outdict
 
 
+## Unity UI: the Canvas itself is handled by importer plugins (see children_parent hooks); the
+## CanvasRenderer carries no data of its own. Both create no node.
+class UnidotCanvas:
+	extends UnidotBehaviour
+
+	func get_godot_type() -> String:
+		return "Node3D"
+
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
+		return null
+
+
+class UnidotCanvasRenderer:
+	extends UnidotComponent
+
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
+		return null
+
+
 class UnidotMonoBehaviour:
 	extends UnidotBehaviour
 	var monoscript: Array:
@@ -6239,7 +6275,7 @@ class UnidotMonoBehaviour:
 	func get_godot_type() -> String:
 		return "GDScript"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var ret: Node = null
 		for plugin in meta.get_enabled_plugins():
 			var this_ret = plugin.handle_monobehaviour(self, state, new_parent, ret)
@@ -6248,6 +6284,15 @@ class UnidotMonoBehaviour:
 		if ret != null:
 			return ret
 		return super.create_godot_node(state, new_parent)
+
+	## Property overrides (prefab instance modifications) on a scripted component: a plugin that
+	## owns the script applies them itself and returns true; otherwise only `m_Enabled` is honoured.
+	func convert_properties(node: Node, uprops: Dictionary) -> Dictionary:
+		for plugin in meta.get_enabled_plugins():
+			if plugin.has_method("convert_monobehaviour_properties"):
+				if plugin.convert_monobehaviour_properties(self, node, uprops):
+					return {}
+		return super.convert_properties(node, uprops)
 
 	# No need yet to override create_godot_node...
 	func create_godot_resource() -> Resource:
@@ -6278,7 +6323,7 @@ class UnidotAnimation:
 	func get_godot_type() -> String:
 		return "AnimationPlayer"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var animplayer: AnimationPlayer = AnimationPlayer.new()
 		state.add_child(animplayer, new_parent, self)
 		animplayer.name = "Animation"
@@ -6378,7 +6423,7 @@ class UnidotAnimator:
 			anim_player.add_animation_library(&"base", base_library)
 		anim_tree.tree_root = root_node
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var animplayer: AnimationPlayer = AnimationPlayer.new()
 		animplayer.name = "AnimationPlayer"
 		state.add_child(animplayer, new_parent, self)
@@ -6558,7 +6603,7 @@ class UnidotAnimator:
 class UnidotLODGroup:
 	extends UnidotBehaviour
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		if keys.get("m_Enabled"):
 			state.prefab_state.lod_groups.append(self)
 		return super.create_godot_node(state, new_parent) # make a default node.
@@ -6567,7 +6612,7 @@ class UnidotLODGroup:
 class UnidotTextMesh:
 	extends UnidotRenderer
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		var text: String = keys.get("m_Text", "")
 
 		var label := Label3D.new()
@@ -6937,7 +6982,7 @@ class DiscardUnidotComponent:
 	func get_godot_type() -> String:
 		return "MissingNode"
 
-	func create_godot_node(state: RefCounted, new_parent: Node3D) -> Node:
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
 		return null
 
 
@@ -7008,9 +7053,9 @@ var _type_dictionary: Dictionary = {
 	# "CachedSpriteAtlas": UnidotCachedSpriteAtlas,
 	# "CachedSpriteAtlasRuntimeData": UnidotCachedSpriteAtlasRuntimeData,
 	"Camera": UnidotCamera,
-	# "Canvas": UnidotCanvas,
+	"Canvas": UnidotCanvas,
 	# "CanvasGroup": UnidotCanvasGroup,
-	# "CanvasRenderer": UnidotCanvasRenderer,
+	"CanvasRenderer": UnidotCanvasRenderer,
 	"CapsuleCollider": UnidotCapsuleCollider,
 	# "CapsuleCollider2D": UnidotCapsuleCollider2D,
 	# "CGProgram": UnidotCGProgram,
