@@ -3372,7 +3372,25 @@ class UnidotRenderTexture:
 	func get_godot_type() -> String:
 		return "ViewportTexture"
 
-	pass
+	func get_godot_extension() -> String:
+		return ".rt.tres"
+
+	## Godot renders to viewports in the scene tree, so the asset becomes a description: an
+	## UdonRenderTexture resource when udon_runtime is installed (its `U.rt_viewport` creates the
+	## SubViewport on first use), otherwise a placeholder texture of the same size.
+	func create_godot_resource() -> Resource:
+		var w: int = int(keys.get("m_Width", 256))
+		var h: int = int(keys.get("m_Height", 256))
+		if ResourceLoader.exists("res://addons/udon_runtime/udon_render_texture.gd"):
+			var scr = load("res://addons/udon_runtime/udon_render_texture.gd")
+			var rt: Resource = scr.new()
+			rt.set("width", w)
+			rt.set("height", h)
+			rt.set("depth", int(keys.get("m_DepthFormat", keys.get("m_Depth", 24))))
+			return rt
+		var ph := PlaceholderTexture2D.new()
+		ph.size = Vector2(w, h)
+		return ph
 
 
 class UnidotCustomRenderTexture:

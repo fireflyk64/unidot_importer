@@ -2565,6 +2565,7 @@ var file_handlers: Dictionary = {
 	"playable": YamlHandler.new(),  # director?
 	"terrainlayer": YamlHandler.new(),  # terrain, not supported
 	"physicmaterial": YamlHandler.new(),  # Physics Material
+	"rendertexture": YamlHandler.new(),  # RenderTexture → UdonRenderTexture / placeholder
 	"overridecontroller": YamlHandler.new(),  # Animator Override Controller
 	"controller": YamlHandler.new(),  # Animator Controller
 	"anim": YamlHandler.new(),  # Animation... # TODO: This should be by type (.asset), not extension

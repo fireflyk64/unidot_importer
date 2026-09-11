@@ -144,7 +144,13 @@ func initialize_skelleys(_state: RefCounted, _objs: Array, _is_prefab: bool):
 
 
 func setup_post_children(game_object: RefCounted, state: RefCounted, node: Node, _avatar_meta: RefCounted):
-	if node == null or not node.has_meta("udon_behaviour"):
+	if node == null:
+		return
+	# Inactive GameObjects: unidot hides them; udon_runtime's SetActive/activeSelf use process_mode
+	# (no Start/Update/OnEnable until a script activates them), so mirror it here.
+	if "enabled" in game_object and not game_object.enabled:
+		node.process_mode = Node.PROCESS_MODE_DISABLED
+	if not node.has_meta("udon_behaviour"):
 		return
 	# An UdonBehaviour whose UdonSharp proxy component is missing (script not in the package):
 	# fall back to the program asset's name, which UdonSharp keeps equal to the class name.
