@@ -535,19 +535,20 @@ func _resolve_pending_ref(e: Dictionary, meta: Resource, state: RefCounted, scen
 			value = _resource_for(ref, _fake_obj(meta), e["what"])
 	if value == null:
 		return
-	if value is Node:
-		# Node references are stored as NodePaths in metadata/udon_refs and bound by
-		# udon_behaviour.gd at _ready: PackedScene only turns Node values into paths for
-		# properties with a node-type hint, which sandbox scripts do not provide.
-		_store_ref(node, str(e["prop"]), int(e["index"]), node.get_path_to(value))
-		return
 	if str(e["prop"]) == "@meta":
-		# forward reference inside a component setting: patch the metadata entry
+		# forward reference inside a component setting (a station's exit location, a pickup's
+		# ExactGrip): patch the metadata entry the adapter reads
 		var mk: String = str(e.get("meta_key", ""))
 		if mk != "" and node.has_meta(mk) and value is Node:
 			var cfg: Dictionary = node.get_meta(mk)
 			cfg[str(e.get("cfg_key", ""))] = node.get_path_to(value)
 			node.set_meta(mk, cfg)
+		return
+	if value is Node:
+		# Node references are stored as NodePaths in metadata/udon_refs and bound by
+		# udon_behaviour.gd at _ready: PackedScene only turns Node values into paths for
+		# properties with a node-type hint, which sandbox scripts do not provide.
+		_store_ref(node, str(e["prop"]), int(e["index"]), node.get_path_to(value))
 		return
 	if int(e["index"]) >= 0:
 		var arr = node.get(e["prop"])
@@ -855,6 +856,10 @@ func _nodepath_for_ref(ref, obj: RefCounted, node: Node, meta_key: String = "", 
 		return NodePath()
 	var target: Node = root.get_node_or_null(np)
 	if target == null:
+		# the path is known but the node is not built yet (a child of this object, e.g. a station's
+		# exit location): resolve once the scene is complete, like unknown fileIDs
+		if meta_key != "":
+			_pending_refs.append({"owner": root, "node": node, "prop": "@meta", "index": -1, "ref": ref, "ty": {"kind": "component"}, "what": "component setting " + cfg_key, "meta": meta, "meta_key": meta_key, "cfg_key": cfg_key})
 		return NodePath()
 	return node.get_path_to(target)
 
