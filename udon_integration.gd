@@ -1091,7 +1091,12 @@ func _store_rect_meta(node: Node, keys: Dictionary) -> void:
 
 ## Unity world canvases do not clip: children may extend far beyond the canvas rect (a 1×1 root
 ## with 300×100 menus is common). Once the UI tree exists, size the viewport to the union of the
-## child rects and move the plane so the canvas keeps its world placement.
+## drawing controls and move the plane so the canvas keeps its world placement. Plain Controls
+## (RectTransforms without a Graphic: menus, anchors, layout groups) are layout helpers whose rects
+## can be far larger than their content (a 100×100 container scaled 200×) and do not count; their
+## scale still applies to what they contain. Same rules as udon_canvas_plane.gd at runtime.
+const MAX_VIEWPORT_PX := 8192.0
+
 func _finalize_world_canvas(node: Node) -> void:
 	var cfg: Dictionary = node.get_meta("udon_canvas")
 	var vp: SubViewport = node.get_node_or_null(cfg.get("viewport", NodePath()))
@@ -1103,10 +1108,21 @@ func _finalize_world_canvas(node: Node) -> void:
 	var k: float = float(cfg.get("k", 1.0))
 	var rsize: Vector2 = cfg.get("size", root.size)
 	var union: Rect2 = Rect2(Vector2.ZERO, rsize)
+	var rects: Array = []
 	for c in root.get_children():
-		union = union.merge(_control_bounds(c, rsize, Vector2.ZERO))
-	var w: int = clampi(int(ceil(union.size.x * k)), 1, 8192)
-	var h: int = clampi(int(ceil(union.size.y * k)), 1, 8192)
+		_content_bounds(c, rsize, Transform2D.IDENTITY, rects)
+	for r in rects:
+		union = union.merge(r)
+	# beyond the viewport limit the pixel density drops instead of stretching the texture
+	if union.size.x * k > MAX_VIEWPORT_PX:
+		k = MAX_VIEWPORT_PX / union.size.x
+	if union.size.y * k > MAX_VIEWPORT_PX:
+		k = MAX_VIEWPORT_PX / union.size.y
+	k = maxf(k, 1e-4)
+	root.scale = Vector2(k, k)
+	cfg["k"] = k
+	var w: int = clampi(int(ceil(union.size.x * k)), 1, int(MAX_VIEWPORT_PX))
+	var h: int = clampi(int(ceil(union.size.y * k)), 1, int(MAX_VIEWPORT_PX))
 	vp.size = Vector2i(w, h)
 	root.position = -union.position * k
 	var pv: Vector2 = cfg.get("pivot", Vector2(0.5, 0.5))
@@ -1126,27 +1142,26 @@ func _finalize_world_canvas(node: Node) -> void:
 	node.set_meta("udon_canvas", cfg)
 
 
-## Bounding rect of a converted control and its descendants in the coordinates of `parent_origin`
-## (its parent's top-left), from the anchor/offset values stored at import.
-func _control_bounds(c: Node, parent_size: Vector2, parent_origin: Vector2) -> Rect2:
+## Append the rect, in root units, of every drawing control at or below `c` (hidden ones included:
+## menus toggled at runtime must fit the plane). Rects come from the anchor/offset values stored at
+## import (the controls are not laid out yet); `to_root` maps c's parent space to root space and
+## carries the ancestors' scale and rotation around their pivots, as Control.get_transform() does.
+func _content_bounds(c: Node, parent_size: Vector2, to_root: Transform2D, out: Array) -> void:
 	if not (c is Control):
-		return Rect2(parent_origin, Vector2.ZERO)
+		return
 	var ctl: Control = c
 	var left: float = ctl.anchor_left * parent_size.x + ctl.offset_left
 	var right: float = ctl.anchor_right * parent_size.x + ctl.offset_right
 	var top: float = ctl.anchor_top * parent_size.y + ctl.offset_top
 	var bottom: float = ctl.anchor_bottom * parent_size.y + ctl.offset_bottom
 	var size: Vector2 = Vector2(maxf(right - left, 0.0), maxf(bottom - top, 0.0))
-	var origin: Vector2 = parent_origin + Vector2(left, top)
-	var r: Rect2 = Rect2(origin, size)
-	if not ctl.scale.is_equal_approx(Vector2.ONE):
-		var pivot: Vector2 = Vector2(ctl.pivot_offset)
-		var s: Vector2 = ctl.scale.abs()
-		r = Rect2(origin + pivot - pivot * s, size * s)
+	var pv: Vector2 = ctl.pivot_offset
+	var local: Transform2D = Transform2D(0.0, Vector2(left, top) + pv) * Transform2D(ctl.rotation, ctl.scale, 0.0, Vector2.ZERO) * Transform2D(0.0, -pv)
+	var xf: Transform2D = to_root * local
+	if ctl.get_class() != "Control":
+		out.append(xf * Rect2(Vector2.ZERO, size))
 	for ch in ctl.get_children():
-		if ch is Control:
-			r = r.merge(_control_bounds(ch, size, origin))
-	return r
+		_content_bounds(ch, size, xf, out)
 
 
 ## RectTransform → Control anchors/offsets (Unity Y-up, Godot Y-down).
