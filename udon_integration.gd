@@ -989,6 +989,9 @@ func children_parent(go: RefCounted, state: RefCounted, node: Node) -> Node:
 	root.name = "Canvas"
 	root.anchor_right = 1.0
 	root.anchor_bottom = 1.0
+	# an invisible full-window container: it must not swallow the clicks meant for the 3D world
+	# (world canvases, pickups) behind it; its controls still receive theirs
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(root, true)
 	root.owner = state.owner
 	node.set_meta("udon_canvas", {"mode": "overlay", "root": node.get_path_to(root), "size": ref_size})
