@@ -233,10 +233,17 @@ func convert_monobehaviour_properties(obj: RefCounted, node: Node, uprops: Dicti
 	if node == null:
 		return false
 	var guid: String = str(obj.monoscript[2]) if obj.monoscript[2] != null else ""
-	if guid == UDON_BEHAVIOUR_GUID:
+	var touches_table: bool = uprops.has("serializedPublicVariablesBytesString")
+	for key in uprops:
+		if str(key).begins_with("publicVariablesUnityEngineObjects"):
+			touches_table = true
+	if guid == UDON_BEHAVIOUR_GUID or (guid == "" and touches_table):
 		var cfg: Dictionary = node.get_meta("udon_behaviour") if node.has_meta("udon_behaviour") else {}
 		_udon_behaviour_config(uprops, cfg)
 		node.set_meta("udon_behaviour", cfg)
+		# UdonSharp 0.x: the instance overrides the variable table of a proxy-less behaviour
+		if touches_table and node.has_meta("udon_legacy_refs") and node.has_meta("udon_class") and manifest.has(str(node.get_meta("udon_class"))):
+			_apply_legacy_override(node, manifest[str(node.get_meta("udon_class"))], uprops, obj, node)
 		return true
 	if guid_to_class.has(guid):
 		var entry: Dictionary = manifest[guid_to_class[guid]]
@@ -336,14 +343,96 @@ func _assign_legacy_fields(host: Node, entry: Dictionary, legacy: Dictionary, st
 	var objects: Array = legacy["objects"]
 	var obj: RefCounted = legacy["obj"]
 	var count: int = 0
+	var ref_map: Dictionary = {}
 	for fname in entry.get("fields", {}):
 		var f: Dictionary = entry["fields"][fname]
 		if not f.get("exported", false) or not vars.has(fname):
 			continue
-		var raw = _legacy_raw(vars[fname]["value"], str(vars[fname]["type"]), objects)
+		var value = vars[fname]["value"]
+		var raw = _legacy_raw(value, str(vars[fname]["type"]), objects)
 		_assign_field(host, str(f["gd"]), f["ty"], raw, obj, state, str(entry["name"]) + "." + str(fname))
+		var idx = _legacy_ref_indices(value)
+		if idx != null:
+			ref_map[fname] = idx
 		count += 1
+	# which object index each reference field uses: a prefab instance that overrides
+	# publicVariablesUnityEngineObjects[i] (or the whole table) is applied against it
+	host.set_meta("udon_legacy_refs", ref_map)
 	return count
+
+
+## The object index of a reference value, a list of them for a reference array, else null.
+func _legacy_ref_indices(value):
+	if value is Dictionary and value.has("$ref"):
+		return int(value["$ref"])
+	if value is Dictionary and str(value.get("$type", "")).split(",")[0].ends_with("[]"):
+		var out: Array = []
+		var any: bool = false
+		for item in value.get("$items", []):
+			if item is Dictionary and item.has("$ref"):
+				out.append(int(item["$ref"]))
+				any = true
+			else:
+				out.append(-1)
+		return out if any else null
+	return null
+
+
+## Prefab-instance override of an UdonSharp 0.x behaviour: a new variable table and / or new
+## entries of publicVariablesUnityEngineObjects (references into the file that instantiates).
+func _apply_legacy_override(host: Node, entry: Dictionary, uprops: Dictionary, obj: RefCounted, node: Node) -> void:
+	var overrides: Dictionary = {}  # object index → reference
+	for key in uprops:
+		var k: String = str(key)
+		if k.begins_with("publicVariablesUnityEngineObjects.Array.data["):
+			overrides[k.substr(k.find("[") + 1).trim_suffix("]").to_int()] = uprops[key]
+	var old_map: Dictionary = host.get_meta("udon_legacy_refs") if host.has_meta("udon_legacy_refs") else {}
+	var new_map: Dictionary = old_map.duplicate(true)
+	var fields: Dictionary = entry.get("fields", {})
+	var text: String = str(uprops.get("serializedPublicVariablesBytesString", ""))
+	var vars: Dictionary = UdonOdin.decode_variable_table(text) if text.length() > 16 else {}
+	for fname in fields:
+		var f: Dictionary = fields[fname]
+		if not f.get("exported", false):
+			continue
+		var what: String = str(entry["name"]) + "." + str(fname)
+		var idx = old_map.get(fname)
+		if vars.has(fname):
+			var value = vars[fname]["value"]
+			idx = _legacy_ref_indices(value)
+			if idx == null:
+				# a plain value: nothing of it refers to objects
+				if not _is_reference_kind(str(f["ty"].get("kind", ""))):
+					var raw = _legacy_raw(value, str(vars[fname]["type"]), [])
+					if str(f["ty"].get("kind", "")) == "array":
+						var elem: Dictionary = f["ty"].get("elem", {})
+						if raw is Array and not _is_reference_kind(str(elem.get("kind", ""))) and str(elem.get("kind", "")) != "resource":
+							var conv: Array = []
+							for x in raw:
+								conv.append(_convert_value(x, elem, what))
+							host.set(str(f["gd"]), conv)
+					elif str(f["ty"].get("kind", "")) != "resource":
+						host.set(str(f["gd"]), _convert_value(raw, f["ty"], what))
+				new_map.erase(fname)
+				continue
+			new_map[fname] = idx
+		if idx == null:
+			continue
+		if idx is int:
+			if overrides.has(idx):
+				_pending_refs.append({"owner": _owner_of(node), "node": host, "prop": str(f["gd"]), "index": -1, "ref": overrides[idx], "ty": f["ty"], "what": what, "meta": obj.meta})
+			elif old_map.get(fname) != idx:
+				_report["unsupported_fields"].append({"field": what, "reason": "variable table override points at another object of the source prefab"})
+		elif idx is Array:
+			var elem2: Dictionary = f["ty"].get("elem", {})
+			var old_list = old_map.get(fname)
+			for n in range(idx.size()):
+				if overrides.has(idx[n]):
+					_pending_refs.append({"owner": _owner_of(node), "node": host, "prop": str(f["gd"]), "index": n, "ref": overrides[idx[n]], "ty": elem2, "what": what, "meta": obj.meta})
+				elif not (old_list is Array and n < old_list.size() and old_list[n] == idx[n]) and idx[n] >= 0:
+					_report["unsupported_fields"].append({"field": what, "reason": "variable table override points at another object of the source prefab"})
+	host.set_meta("udon_legacy_refs", new_map)
+	_report["legacy_overrides"] = int(_report.get("legacy_overrides", 0)) + 1
 
 
 ## A decoded Odin value in the shape unidot's YAML parser gives the same data (references as

@@ -75,7 +75,8 @@ func pack_scene(pkgasset, is_prefab) -> PackedScene:
 	var navregion: NavigationRegion3D = null
 	var occlusion: OccluderInstance3D = null
 	var dirlight: DirectionalLight3D = null
-	var scene_contents: Node3D = null
+	# Node, not Node3D: the root of a UI prefab (a list entry, a panel) is a Control
+	var scene_contents: Node = null
 	var node_map: Dictionary = {}
 	if is_prefab:
 		if len(arr) > 1:
@@ -285,7 +286,7 @@ func pack_scene(pkgasset, is_prefab) -> PackedScene:
 			asset.create_skeleton_bone(node_state, skel)
 		else:
 			# asset.log_debug(str(asset) + " position " + str(asset.transform.godot_transform))
-			var new_root: Node3D = asset.create_godot_node(node_state, scene_contents)
+			var new_root: Node = asset.create_godot_node(node_state, scene_contents)
 			if scene_contents == null:
 				assert(is_prefab)
 				scene_contents = new_root

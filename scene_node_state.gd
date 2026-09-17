@@ -486,7 +486,7 @@ class Skelley:
 		assert(found_prefab_instance == other.found_prefab_instance)
 
 
-func _init(database: Resource, meta: Resource, root_node: Node3D):
+func _init(database: Resource, meta: Resource, root_node: Node):
 	init_node_state(database, meta, root_node)
 
 
@@ -542,7 +542,7 @@ func add_fileID(child: Node, obj: RefCounted):
 	#	meta.fileid_to_nodepath[fileID] = root_nodepath
 
 
-func init_node_state(database: Resource, meta: Resource, root_node: Node3D) -> RefCounted:
+func init_node_state(database: Resource, meta: Resource, root_node: Node) -> RefCounted:
 	self.database = database
 	self.meta = meta
 	self.owner = root_node
@@ -716,7 +716,7 @@ func state_with_meta(new_meta: Resource) -> RefCounted:
 	return state
 
 
-func state_with_owner(new_owner: Node3D) -> RefCounted:
+func state_with_owner(new_owner: Node) -> RefCounted:
 	var state = duplicate()
 	state.owner = new_owner
 	if state.scene_contents == null:
