@@ -203,14 +203,14 @@ func setup_post_scene(pkgasset: RefCounted, _root_objects: Array, _root_skelleys
 	var owner: Node = scene_contents
 	var remaining: Array = []
 	for e in _pending_refs:
-		if e["owner"] != owner:
+		if not _pending_belongs(e, owner):
 			remaining.append(e)
 			continue
 		_resolve_pending_ref(e, meta, state, scene_contents)
 	_pending_refs = remaining
 	remaining = []
 	for e in _pending_events:
-		if e["owner"] != owner:
+		if not _pending_belongs(e, owner):
 			remaining.append(e)
 			continue
 		_resolve_pending_event(e, meta, state, scene_contents)
@@ -601,7 +601,10 @@ func _resolve_pending_ref(e: Dictionary, meta: Resource, state: RefCounted, scen
 
 
 func _store_ref(node: Node, prop: String, index: int, np: NodePath) -> void:
-	var refs: Dictionary = node.get_meta("udon_refs") if node.has_meta("udon_refs") else {}
+	# A copy: the node of a prefab instance shares this dictionary with the instanced scene's
+	# state, and a value changed in place compares equal to the original, so PackedScene would
+	# not save the override (EmyChess: PiecePlacer.board on instances of AnarchyControls.prefab).
+	var refs: Dictionary = node.get_meta("udon_refs").duplicate(true) if node.has_meta("udon_refs") else {}
 	if index >= 0:
 		var arr: Array = refs.get(prop, []) if refs.get(prop) is Array else []
 		var cur = node.get(prop)
@@ -905,6 +908,16 @@ func _nodepath_for_ref(ref, obj: RefCounted, node: Node, meta_key: String = "", 
 			_pending_refs.append({"owner": root, "node": node, "prop": "@meta", "index": -1, "ref": ref, "ty": {"kind": "component"}, "what": "component setting " + cfg_key, "meta": meta, "meta_key": meta_key, "cfg_key": cfg_key})
 		return NodePath()
 	return node.get_path_to(target)
+
+
+## A pending entry belongs to the scene being finished when it was queued for it, or when its
+## node sits inside it: an override on a nested prefab instance is queued while the instance root
+## has no owner yet, so the owner walk stops at that root instead of the scene.
+func _pending_belongs(e: Dictionary, scene_root: Node) -> bool:
+	if e["owner"] == scene_root:
+		return true
+	var n = e.get("node")
+	return n is Node and is_instance_valid(n) and scene_root.is_ancestor_of(n)
 
 
 func _owner_of(node: Node) -> Node:
