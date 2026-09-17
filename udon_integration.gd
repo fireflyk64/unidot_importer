@@ -1174,10 +1174,18 @@ func _content_bounds(c: Node, parent_size: Vector2, to_root: Transform2D, out: A
 	var pv: Vector2 = ctl.pivot_offset
 	var local: Transform2D = Transform2D(0.0, Vector2(left, top) + pv) * Transform2D(ctl.rotation, ctl.scale, 0.0, Vector2.ZERO) * Transform2D(0.0, -pv)
 	var xf: Transform2D = to_root * local
+	var own: Rect2 = xf * Rect2(Vector2.ZERO, size)
 	if ctl.get_class() != "Control":
-		out.append(xf * Rect2(Vector2.ZERO, size))
+		out.append(own)
+	# a Mask / RectMask2D / ScrollRect clips what it holds: hidden scroll content must not grow the plane
+	var inner: Array = [] if (ctl.clip_contents or ctl is ScrollContainer) else out
 	for ch in ctl.get_children():
-		_content_bounds(ch, size, xf, out)
+		_content_bounds(ch, size, xf, inner)
+	if inner != out:
+		for r in inner:
+			var clipped: Rect2 = (r as Rect2).intersection(own)
+			if clipped.size.x > 0.0 and clipped.size.y > 0.0:
+				out.append(clipped)
 
 
 ## RectTransform → Control anchors/offsets (Unity Y-up, Godot Y-down).
@@ -1270,7 +1278,20 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 				ctl.selected = _to_int(keys.get("m_Value", 0))
 			_queue_events(keys.get("m_OnValueChanged"), ctl, "item_selected", 1, state, obj)
 		"ScrollRect":
-			pass
+			if ctl is ScrollContainer:
+				# Unity draws its own Scrollbar objects: Godot's bars stay hidden but keep scrolling
+				ctl.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER if _to_int(keys.get("m_Horizontal", 1)) != 0 else ScrollContainer.SCROLL_MODE_DISABLED
+				ctl.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER if _to_int(keys.get("m_Vertical", 1)) != 0 else ScrollContainer.SCROLL_MODE_DISABLED
+				ctl.set_meta("udon_scroll", {})
+				if keys.has("m_Content"):
+					var cp: NodePath = _nodepath_for_ref(keys["m_Content"], obj, ctl, "udon_scroll", "content")
+					if cp != NodePath():
+						ctl.set_meta("udon_scroll", {"content": cp})
+				# udon_runtime's scroll rect script sizes the scrolled child from the content and
+				# raises `scrolled` (ScrollRect.onValueChanged)
+				if ResourceLoader.exists("res://addons/udon_runtime/udon_scroll_rect.gd"):
+					ctl.set_script(load("res://addons/udon_runtime/udon_scroll_rect.gd"))
+					_queue_events(keys.get("m_OnValueChanged"), ctl, "scrolled", 1, state, obj)
 		"Mask", "RectMask2D":
 			ctl.clip_contents = true
 			if kind == "Mask" and _to_int(keys.get("m_ShowMaskGraphic", 1)) == 0 and ctl is TextureRect:
