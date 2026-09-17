@@ -236,6 +236,15 @@ func convert_monobehaviour_properties(obj: RefCounted, node: Node, uprops: Dicti
 		for key in uprops:
 			_apply_override(host, entry, str(key), uprops[key], obj, node)
 		return true
+	if guid == "":
+		# A modification of a component inside a nested prefab instance arrives as a virtual object
+		# without m_Script (`PiecePlacer.board` set on an instance of AnarchyControls.prefab): the
+		# node that the source prefab built knows which class it hosts.
+		var found: Array = _host_for_fields(node, uprops)
+		if not found.is_empty():
+			for key in uprops:
+				_apply_override(found[0], found[1], str(key), uprops[key], obj, node)
+			return true
 	var kind: String = _identify_component(guid, obj.keys)
 	if kind != "" and not UI_COMPONENTS.values().has(kind):
 		var meta_key: String = _component_meta_key(kind)
@@ -283,6 +292,32 @@ func _attach_script(obj: RefCounted, state: RefCounted, node: Node, entry: Dicti
 		if not keys.has(fname):
 			continue
 		_assign_field(host, str(f["gd"]), f["ty"], keys[fname], obj, state, str(entry["name"]) + "." + str(fname))
+
+
+## The scripted host on `node` (the node itself or a component child) whose class declares the
+## overridden fields: [host, manifest entry], or [] when none does.
+func _host_for_fields(node: Node, uprops: Dictionary) -> Array:
+	var candidates: Array = [node]
+	for c in node.get_children():
+		if c.has_meta("udon_component_child"):
+			candidates.append(c)
+	var best: Array = []
+	var best_hits: int = 0
+	for cand in candidates:
+		if not cand.has_meta("udon_class"):
+			continue
+		var cname: String = str(cand.get_meta("udon_class"))
+		if not manifest.has(cname):
+			continue
+		var fields: Dictionary = manifest[cname].get("fields", {})
+		var hits: int = 0
+		for key in uprops:
+			if fields.has(str(key).split(".")[0]):
+				hits += 1
+		if hits > best_hits:
+			best_hits = hits
+			best = [cand, manifest[cname]]
+	return best
 
 
 func _script_host(node: Node, entry: Dictionary) -> Node:
