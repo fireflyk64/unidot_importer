@@ -129,7 +129,9 @@ func pack_scene(pkgasset, is_prefab) -> PackedScene:
 			if not ps.non_stripped_prefab_references.has(prefab_instance_id):
 				ps.non_stripped_prefab_references[prefab_instance_id] = [].duplicate()
 			ps.non_stripped_prefab_references[prefab_instance_id].push_back(asset)
-		elif asset.type == "Transform" or asset.type == "PrefabInstance":
+		elif asset.type == "Transform" or asset.type == "RectTransform" or asset.type == "PrefabInstance":
+			# RectTransform too: a Canvas parented to a node of a model instance (a screen mesh
+			# of an FBX) is a child of a stripped Transform like any other added GameObject.
 			parent = asset.parent
 			if parent != null and parent.is_prefab_reference and (asset.type == "PrefabInstance" or not asset.is_prefab_reference):
 				var prefab_instance_id: int = parent.prefab_instance[1]
