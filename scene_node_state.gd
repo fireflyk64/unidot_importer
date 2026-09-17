@@ -926,7 +926,7 @@ func lookup_or_virtual_transform(fileID: int, target_prefab_meta: Resource, targ
 	return ret
 
 
-func add_bones_to_prefabbed_skeletons(fileID: int, target_prefab_meta: Resource, instanced_scene: Node3D):
+func add_bones_to_prefabbed_skeletons(fileID: int, target_prefab_meta: Resource, instanced_scene: Node):
 	meta.log_debug(fileID, "Add bones to prefabbed skeletons")
 	var fileid_to_added_bone: Dictionary = {}.duplicate()
 	var fileid_to_skeleton_nodepath: Dictionary = {}.duplicate()

@@ -4486,7 +4486,7 @@ class UnidotPrefabInstance:
 		meta.transform_fileid_to_parent_fileid[meta.xor_or_stripped(target_prefab_meta.prefab_main_transform_id, self.fileID)] = self.parent_ref[1]
 		log_debug("Assigning prefab root transform " + str(meta.xor_or_stripped(target_prefab_meta.prefab_main_transform_id, self.fileID)) + " parent fileid " + str(self.parent_ref[1]))
 		log_debug("Instancing PackedScene at " + str(packed_scene.resource_path) + ": " + str(packed_scene.resource_name))
-		var instanced_scene: Node3D = null
+		var instanced_scene: Node = null  # a UI prefab has a Control root
 		var toplevel_rename: String = ""
 		for mod in modifications:
 			var property_key: String = mod.get("propertyPath", "")

@@ -23,7 +23,20 @@ const UDON_BEHAVIOUR_GUID := "45115577ef41a5b4ca741ed302693907"
 ## VRChat SDK component scripts by GUID (asset packages rarely ship the SDK, so the field
 ## signature fallback in `_identify_component` covers the rest).
 const KNOWN_COMPONENTS := {
-	"661092b4961be7145bfbe56e1e62337b": "VRC_Pickup",
+}
+
+## Scenes saved against the SDK's DLLs reference every SDK component through the DLL's GUID; the
+## class is the fileID. (Mapping the GUID alone to VRC_Pickup tagged the pool table's 34 spatial
+## audio sources, 9 object syncs and 8 UI shapes as pickups.)
+const VRCSDK3_DLL_GUID := "661092b4961be7145bfbe56e1e62337b"
+const VRCSDK3_DLL_CLASSES := {
+	1804438810: "VRC_Pickup",
+	-617992517: "VRCSpatialAudioSource",
+	-1783056023: "VRCObjectSync",
+	-1533785930: "VRC_UiShape",
+	-560078975: "VRCVideoPlayer",
+	-17141911: "VRC_SceneDescriptor",
+	454367647: "VRCObjectPool",
 }
 
 ## Unity UI / TextMeshPro component scripts by GUID.
@@ -124,7 +137,7 @@ func handle_monobehaviour(obj: RefCounted, state: RefCounted, node: Node, _exist
 	if guid_to_class.has(guid):
 		_attach_script(obj, state, node, manifest[guid_to_class[guid]])
 		return null
-	var kind: String = _identify_component(guid, keys)
+	var kind: String = _identify_component(guid, keys, _to_int(obj.monoscript[1]))
 	if kind == "":
 		_note_unknown(guid, obj, node)
 		return null
@@ -262,7 +275,7 @@ func convert_monobehaviour_properties(obj: RefCounted, node: Node, uprops: Dicti
 			for key in uprops:
 				_apply_override(found[0], found[1], str(key), uprops[key], obj, node)
 			return true
-	var kind: String = _identify_component(guid, obj.keys)
+	var kind: String = _identify_component(guid, obj.keys, _to_int(obj.monoscript[1]))
 	if kind != "" and not UI_COMPONENTS.values().has(kind):
 		var meta_key: String = _component_meta_key(kind)
 		var cfg2: Dictionary = node.get_meta(meta_key) if node.has_meta(meta_key) else {}
@@ -896,7 +909,9 @@ func _udon_behaviour_config(keys: Dictionary, cfg: Dictionary) -> void:
 		cfg["enabled"] = _to_int(keys["m_Enabled"]) != 0
 
 
-func _identify_component(guid: String, keys: Dictionary) -> String:
+func _identify_component(guid: String, keys: Dictionary, file_id: int = 0) -> String:
+	if guid == VRCSDK3_DLL_GUID and VRCSDK3_DLL_CLASSES.has(file_id):
+		return VRCSDK3_DLL_CLASSES[file_id]
 	if KNOWN_COMPONENTS.has(guid):
 		return KNOWN_COMPONENTS[guid]
 	if UI_COMPONENTS.has(guid):
@@ -927,6 +942,8 @@ func _identify_component(guid: String, keys: Dictionary) -> String:
 		return "VRC_PortalMarker"
 	if keys.has("videoURL") and keys.has("autoPlay"):
 		return "VRCVideoPlayer"
+	if keys.has("Gain") and keys.has("Far") and keys.has("EnableSpatialization"):
+		return "VRCSpatialAudioSource"
 	if keys.has("m_TextComponent") and keys.has("m_CharacterLimit"):
 		return "TMP_InputField" if keys.has("m_FontAsset") else "InputField"
 	if keys.has("m_CaptionText") and keys.has("m_Options"):
@@ -970,6 +987,8 @@ func _component_meta_key(kind: String) -> String:
 			return "udon_portal"
 		"VRCVideoPlayer":
 			return "udon_video"
+		"VRCSpatialAudioSource":
+			return "udon_spatial_audio"
 	return "udon_" + kind.to_lower()
 
 
@@ -1043,6 +1062,16 @@ func _component_config(kind: String, keys: Dictionary, obj: RefCounted, node: No
 		"VRC_PortalMarker":
 			_cfg_str(c, keys, "roomId", "room_id")
 			_cfg_str(c, keys, "roomName", "room_name")
+		"VRCSpatialAudioSource":
+			for pair in [["Gain", "gain"], ["Near", "near"], ["Far", "far"], ["VolumetricRadius", "volumetric_radius"]]:
+				if keys.has(pair[0]):
+					c[pair[1]] = _to_float(keys[pair[0]])
+			_cfg_bool(c, keys, "EnableSpatialization", "spatialize")
+			_cfg_bool(c, keys, "UseAudioSourceVolumeCurve", "use_source_curve")
+			# VRChat's Far is where the sound stops: the Godot player's max_distance
+			for sib in node.get_children():
+				if sib is AudioStreamPlayer3D and float(c.get("far", 0.0)) > 0.0 and not bool(c.get("use_source_curve", false)):
+					sib.max_distance = float(c["far"])
 		"VRCVideoPlayer":
 			_cfg_bool(c, keys, "autoPlay", "auto_play")
 			_cfg_bool(c, keys, "loop", "loop")
@@ -1153,7 +1182,7 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 		if component == null or component.type != "MonoBehaviour":
 			continue
 		var g: String = str(component.monoscript[2]) if component.monoscript[2] != null else ""
-		var kind: String = _identify_component(g, component.keys)
+		var kind: String = _identify_component(g, component.keys, _to_int(component.monoscript[1]))
 		if kind != "":
 			kinds.append(kind)
 	for k in UI_PRIMARY_ORDER:
