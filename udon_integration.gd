@@ -1179,6 +1179,7 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 		return null  # a top-level Canvas GameObject stays a Node3D; see children_parent()
 	var primary: String = ""
 	var kinds: Array = []
+	var kind_keys: Dictionary = {}
 	for component_ref in go.components:
 		var component = go.meta.lookup(component_ref.values()[0])
 		if component == null or component.type != "MonoBehaviour":
@@ -1187,10 +1188,13 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 		var kind: String = _identify_component(g, component.keys, _to_int(component.monoscript[1]))
 		if kind != "":
 			kinds.append(kind)
+			kind_keys[kind] = component.keys
 	for k in UI_PRIMARY_ORDER:
 		if kinds.has(k):
 			primary = k
 			break
+	# Unity's Direction: 0 LeftToRight, 1 RightToLeft, 2 BottomToTop, 3 TopToBottom
+	var vertical: bool = _to_int(kind_keys.get(primary, {}).get("m_Direction", 0)) >= 2
 	var node: Control
 	match primary:
 		"Button":
@@ -1200,8 +1204,11 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 			node = Button.new()
 			node.toggle_mode = true
 			node.flat = true
-		"Slider", "Scrollbar":
-			node = HSlider.new()
+		"Slider":
+			node = VSlider.new() if vertical else HSlider.new()
+		"Scrollbar":
+			# a real scroll bar: scripts find it as a Scrollbar and a ScrollRect links to it
+			node = VScrollBar.new() if vertical else HScrollBar.new()
 		"InputField", "TMP_InputField", "VRCUrlInputField":
 			node = LineEdit.new()
 		"Dropdown", "TMP_Dropdown":
@@ -1525,7 +1532,17 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 				ctl.button_pressed = _to_int(keys.get("m_IsOn", 0)) != 0
 				ctl.disabled = _to_int(keys.get("m_Interactable", 1)) == 0
 			_queue_events(keys.get("onValueChanged"), ctl, "toggled", 1, state, obj)
-		"Slider", "Scrollbar":
+		"Scrollbar":
+			if ctl is Range:
+				# Unity's value runs 0..1 whatever the handle size is: no page, the size is kept aside
+				ctl.min_value = 0.0
+				ctl.max_value = 1.0
+				ctl.step = 0.0
+				ctl.page = 0.0
+				ctl.value = _to_float(keys.get("m_Value", 0.0))
+				ctl.set_meta("udon_scrollbar", {"direction": _to_int(keys.get("m_Direction", 0)), "size": _to_float(keys.get("m_Size", 1.0))})
+			_queue_events(keys.get("m_OnValueChanged"), ctl, "value_changed", 1, state, obj)
+		"Slider":
 			if ctl is Range:
 				ctl.min_value = _to_float(keys.get("m_MinValue", 0.0))
 				ctl.max_value = _to_float(keys.get("m_MaxValue", 1.0))
@@ -1555,10 +1572,15 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 				ctl.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER if _to_int(keys.get("m_Horizontal", 1)) != 0 else ScrollContainer.SCROLL_MODE_DISABLED
 				ctl.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER if _to_int(keys.get("m_Vertical", 1)) != 0 else ScrollContainer.SCROLL_MODE_DISABLED
 				ctl.set_meta("udon_scroll", {})
-				if keys.has("m_Content"):
-					var cp: NodePath = _nodepath_for_ref(keys["m_Content"], obj, ctl, "udon_scroll", "content")
-					if cp != NodePath():
-						ctl.set_meta("udon_scroll", {"content": cp})
+				# content and the Unity Scrollbar objects are built later: unresolved ones are
+				# patched into the metadata when the scene is complete
+				for pair in [["m_Content", "content"], ["m_VerticalScrollbar", "vbar"], ["m_HorizontalScrollbar", "hbar"]]:
+					if keys.has(pair[0]):
+						var cp: NodePath = _nodepath_for_ref(keys[pair[0]], obj, ctl, "udon_scroll", pair[1])
+						if cp != NodePath():
+							var sc: Dictionary = ctl.get_meta("udon_scroll")
+							sc[pair[1]] = cp
+							ctl.set_meta("udon_scroll", sc)
 				# udon_runtime's scroll rect script sizes the scrolled child from the content and
 				# raises `scrolled` (ScrollRect.onValueChanged)
 				if ResourceLoader.exists("res://addons/udon_runtime/udon_scroll_rect.gd"):
