@@ -541,7 +541,13 @@ func _resolve_pending_ref(e: Dictionary, meta: Resource, state: RefCounted, scen
 		var mk: String = str(e.get("meta_key", ""))
 		if mk != "" and node.has_meta(mk) and value is Node:
 			var cfg: Dictionary = node.get_meta(mk)
-			cfg[str(e.get("cfg_key", ""))] = node.get_path_to(value)
+			var ck: String = str(e.get("cfg_key", ""))
+			if ck.ends_with("[]"):
+				var arr: Array = cfg.get(ck.trim_suffix("[]"), [])
+				arr.append(node.get_path_to(value))
+				cfg[ck.trim_suffix("[]")] = arr
+			else:
+				cfg[ck] = node.get_path_to(value)
 			node.set_meta(mk, cfg)
 		return
 	if value is Node:
@@ -794,7 +800,9 @@ func _component_config(kind: String, keys: Dictionary, obj: RefCounted, node: No
 			if keys.has("spawns") and keys["spawns"] is Array:
 				var sp: Array = []
 				for r in keys["spawns"]:
-					var np: NodePath = _nodepath_for_ref(r, obj, node)
+					# a spawn is often a child of the descriptor object, built after it: "spawns[]"
+					# makes the pending resolver append to the array
+					var np: NodePath = _nodepath_for_ref(r, obj, node, "udon_scene_descriptor", "spawns[]")
 					if np != NodePath():
 						sp.append(np)
 				c["spawns"] = sp
