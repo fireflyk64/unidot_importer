@@ -1565,6 +1565,15 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 					for o in opts.get("m_Options", []):
 						ctl.add_item(str(o.get("m_Text", "")) if o is Dictionary else str(o))
 				ctl.selected = _to_int(keys.get("m_Value", 0))
+				# Unity draws the caption with its own Text child (built later): udon_runtime's
+				# dropdown script hides the button's own text and keeps that label up to date
+				ctl.set_meta("udon_dropdown", {})
+				if keys.has("m_CaptionText"):
+					var cap: NodePath = _nodepath_for_ref(keys["m_CaptionText"], obj, ctl, "udon_dropdown", "caption")
+					if cap != NodePath():
+						ctl.set_meta("udon_dropdown", {"caption": cap})
+				if ResourceLoader.exists("res://addons/udon_runtime/udon_dropdown.gd"):
+					ctl.set_script(load("res://addons/udon_runtime/udon_dropdown.gd"))
 			_queue_events(keys.get("m_OnValueChanged"), ctl, "item_selected", 1, state, obj)
 		"ScrollRect":
 			if ctl is ScrollContainer:
