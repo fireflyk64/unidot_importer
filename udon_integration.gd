@@ -1239,6 +1239,20 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 	return node
 
 
+var _white_tex: Texture2D = null
+
+## Shared 4 x 4 white texture (udon_runtime ships it) for graphics that have no sprite.
+func _white_texture() -> Texture2D:
+	if _white_tex == null:
+		if ResourceLoader.exists("res://addons/udon_runtime/ui_white.png"):
+			_white_tex = load("res://addons/udon_runtime/ui_white.png")
+		if _white_tex == null:
+			var img := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+			img.fill(Color.WHITE)
+			_white_tex = ImageTexture.create_from_image(img)
+	return _white_tex
+
+
 ## Children of a Canvas GameObject are built inside its SubViewport (world space) or CanvasLayer.
 ## Is `n` inside a converted canvas (its viewport or layer)?
 func _inside_canvas(n: Node) -> bool:
@@ -1505,8 +1519,11 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 			var tex: Texture2D = _sprite_texture(obj.get_ref(keys, "m_Sprite"), obj)
 			var col: Color = keys.get("m_Color", Color.WHITE) if keys.get("m_Color") is Color else Color.WHITE
 			if ctl is TextureRect:
-				ctl.texture = tex
-				ctl.modulate = col
+				# Unity draws an Image without a sprite as a solid rectangle in its colour, and the
+				# built-in UI sprites (UISprite, Background, Knob ...) are not part of any package:
+				# both get a white texture. The colour tints this graphic only, not its children.
+				ctl.texture = tex if tex != null else _white_texture()
+				ctl.self_modulate = col
 				if _to_int(keys.get("m_PreserveAspect", 0)) != 0:
 					ctl.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 			else:
@@ -1515,8 +1532,8 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 			var tex2: Texture2D = _sprite_texture(obj.get_ref(keys, "m_Texture"), obj)
 			var col2: Color = keys.get("m_Color", Color.WHITE) if keys.get("m_Color") is Color else Color.WHITE
 			if ctl is TextureRect:
-				ctl.texture = tex2
-				ctl.modulate = col2
+				ctl.texture = tex2 if tex2 != null else _white_texture()
+				ctl.self_modulate = col2
 			else:
 				_apply_background(ctl, tex2, col2, keys)
 		"Text":
