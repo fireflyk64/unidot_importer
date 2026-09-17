@@ -17,6 +17,7 @@ extends RefCounted
 ##   udon/manifest        = "res://converted/udon_manifest.json"   (written by udon2godot --manifest)
 ## A diagnostics report is written to `udon/import_report` (default res://udon_import_report.json).
 
+const UdonOdin := preload("./udon_odin.gd")
 const UDON_BEHAVIOUR_GUID := "45115577ef41a5b4ca741ed302693907"
 
 ## VRChat SDK component scripts by GUID (asset packages rarely ship the SDK, so the field
@@ -76,6 +77,8 @@ var _report: Dictionary = {
 	"components": {},
 }
 var _unknown_seen: Dictionary = {}
+## UdonSharp 0.x: node instance id → {"vars": decoded UdonVariableTable, "objects": refs, "obj": UdonBehaviour}
+var _legacy_tables: Dictionary = {}
 
 
 func set_database(db) -> void:
@@ -191,7 +194,14 @@ func setup_post_children(game_object: RefCounted, state: RefCounted, node: Node,
 				node.set_script(script)
 				node.set_meta("udon_class", cname)
 				_report["scripts_attached"] += 1
-				_report["missing_proxies"].append({"class": cname, "node": str(node.name), "note": "proxy MonoBehaviour missing; exported fields keep their defaults"})
+				var legacy = _legacy_tables.get(node.get_instance_id())
+				if legacy != null:
+					var assigned: int = _assign_legacy_fields(node, manifest[cname], legacy, state)
+					_report["legacy_tables"] = int(_report.get("legacy_tables", 0)) + 1
+					_report["legacy_fields"] = int(_report.get("legacy_fields", 0)) + assigned
+				else:
+					_report["missing_proxies"].append({"class": cname, "node": str(node.name), "note": "proxy MonoBehaviour missing; exported fields keep their defaults"})
+	_legacy_tables.erase(node.get_instance_id())
 
 
 func setup_post_prefab(_prefab_object: RefCounted, _state: RefCounted, _instanced_scene: Node):
@@ -318,6 +328,93 @@ func _host_for_fields(node: Node, uprops: Dictionary) -> Array:
 			best_hits = hits
 			best = [cand, manifest[cname]]
 	return best
+
+
+## UdonSharp 0.x: set the exported fields of a proxy-less behaviour from its Udon variable table.
+func _assign_legacy_fields(host: Node, entry: Dictionary, legacy: Dictionary, state: RefCounted) -> int:
+	var vars: Dictionary = legacy["vars"]
+	var objects: Array = legacy["objects"]
+	var obj: RefCounted = legacy["obj"]
+	var count: int = 0
+	for fname in entry.get("fields", {}):
+		var f: Dictionary = entry["fields"][fname]
+		if not f.get("exported", false) or not vars.has(fname):
+			continue
+		var raw = _legacy_raw(vars[fname]["value"], str(vars[fname]["type"]), objects)
+		_assign_field(host, str(f["gd"]), f["ty"], raw, obj, state, str(entry["name"]) + "." + str(fname))
+		count += 1
+	return count
+
+
+## A decoded Odin value in the shape unidot's YAML parser gives the same data (references as
+## [null, fileID, guid, type], structs as Godot values, arrays as Array).
+func _legacy_raw(v, tname: String, objects: Array):
+	if v is Dictionary:
+		if v.has("$ref"):
+			var i: int = int(v["$ref"])
+			return objects[i] if i >= 0 and i < objects.size() else [null, 0, null, 0]
+		if v.has("$prim"):
+			return _legacy_prim_array(v, tname)
+		var t: String = str(v.get("$type", tname))
+		var short: String = t.split(",")[0].strip_edges()
+		var items: Array = v.get("$items", []) if v.get("$items", []) is Array else []
+		if short.ends_with("[]"):
+			var et: String = short.trim_suffix("[]")
+			# primitive element types come as one packed block
+			if items.size() == 1 and items[0] is Dictionary and items[0].has("$prim"):
+				return _legacy_prim_array(items[0], et)
+			var out: Array = []
+			for item in items:
+				out.append(_legacy_raw(item[1] if (item is Array and item.size() == 2 and item[0] is String) else item, et, objects))
+			return out
+		# structs are written as their fields in declaration order, named or not
+		var c: Array = []
+		for item in items:
+			c.append(item[1] if (item is Array and item.size() == 2 and item[0] is String) else item)
+		match short:
+			"UnityEngine.Vector2":
+				return Vector2(_legacy_comp(v, c, "x", 0), _legacy_comp(v, c, "y", 1))
+			"UnityEngine.Vector3":
+				return Vector3(_legacy_comp(v, c, "x", 0), _legacy_comp(v, c, "y", 1), _legacy_comp(v, c, "z", 2))
+			"UnityEngine.Vector4", "UnityEngine.Quaternion":
+				return Quaternion(_legacy_comp(v, c, "x", 0), _legacy_comp(v, c, "y", 1), _legacy_comp(v, c, "z", 2), _legacy_comp(v, c, "w", 3))
+			"UnityEngine.Color":
+				return Color(_legacy_comp(v, c, "r", 0), _legacy_comp(v, c, "g", 1), _legacy_comp(v, c, "b", 2), _legacy_comp(v, c, "a", 3))
+			"UnityEngine.Color32":
+				return Color(_legacy_comp(v, c, "r", 0), _legacy_comp(v, c, "g", 1), _legacy_comp(v, c, "b", 2), _legacy_comp(v, c, "a", 3))
+			"VRC.SDKBase.VRCUrl":
+				return str(v.get("url", c[0] if c.size() > 0 else ""))
+		return null
+	return v
+
+
+func _legacy_comp(v: Dictionary, positional: Array, name: String, index: int) -> float:
+	if v.has(name):
+		return float(v[name])
+	if index < positional.size() and (positional[index] is float or positional[index] is int):
+		return float(positional[index])
+	return 0.0
+
+
+func _legacy_prim_array(v: Dictionary, tname: String) -> Array:
+	var out: Array = []
+	var bytes: PackedByteArray = v["bytes"]
+	var bpe: int = int(v["$prim"])
+	var is_float: bool = tname.begins_with("System.Single") or tname.begins_with("System.Double")
+	for n in range(int(v["count"])):
+		var o: int = n * bpe
+		match bpe:
+			1:
+				out.append(bytes[o] != 0 if tname.begins_with("System.Boolean") else bytes.decode_u8(o))
+			2:
+				out.append(bytes.decode_s16(o))
+			4:
+				out.append(bytes.decode_float(o) if is_float else bytes.decode_s32(o))
+			8:
+				out.append(bytes.decode_double(o) if is_float else bytes.decode_s64(o))
+			_:
+				out.append(0)
+	return out
 
 
 func _script_host(node: Node, entry: Dictionary) -> Node:
@@ -690,6 +787,13 @@ func _handle_udon_behaviour(obj: RefCounted, state: RefCounted, node: Node) -> v
 			cfg["program_class"] = str(m.path).get_file().get_basename()
 	node.set_meta("udon_behaviour", cfg)
 	state.add_fileID(node, obj)
+	# UdonSharp 0.x has no proxy component: the field values are in the Udon variable table
+	var table_text: String = str(obj.keys.get("serializedPublicVariablesBytesString", ""))
+	if table_text.length() > 16:
+		var vars: Dictionary = UdonOdin.decode_variable_table(table_text)
+		if not vars.is_empty():
+			var objects = obj.keys.get("publicVariablesUnityEngineObjects", [])
+			_legacy_tables[node.get_instance_id()] = {"vars": vars, "objects": objects if objects is Array else [], "obj": obj}
 
 
 func _udon_behaviour_config(keys: Dictionary, cfg: Dictionary) -> void:
