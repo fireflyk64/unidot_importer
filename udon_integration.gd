@@ -1037,7 +1037,9 @@ func _component_config(kind: String, keys: Dictionary, obj: RefCounted, node: No
 			if keys.has("Pool") and keys["Pool"] is Array:
 				var paths: Array = []
 				for r in keys["Pool"]:
-					var np: NodePath = _nodepath_for_ref(r, obj, node)
+					# pooled objects are usually children of the pool, built after it: "pool[]"
+					# entries that cannot be resolved yet are appended when the scene is complete
+					var np: NodePath = _nodepath_for_ref(r, obj, node, "udon_object_pool", "pool[]")
 					if np != NodePath():
 						paths.append(np)
 				c["pool"] = paths
