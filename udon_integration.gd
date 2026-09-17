@@ -1239,6 +1239,21 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 	return node
 
 
+## The helper child that runs Unity's auto layout for `ctl` (udon_runtime/udon_layout_group.gd).
+## A child, not a script on the Control: that slot belongs to an Udon behaviour of the object.
+func _ensure_layout_helper(ctl: Control, state: RefCounted) -> void:
+	if ctl.get_node_or_null("UdonLayout") != null:
+		return
+	if not ResourceLoader.exists("res://addons/udon_runtime/udon_layout_group.gd"):
+		return
+	var helper := Node.new()
+	helper.name = "UdonLayout"
+	helper.set_meta("udon_component_child", true)
+	helper.set_script(load("res://addons/udon_runtime/udon_layout_group.gd"))
+	ctl.add_child(helper)
+	helper.owner = state.owner if state.owner != null else ctl
+
+
 var _white_tex: Texture2D = null
 
 ## Shared 4 x 4 white texture (udon_runtime ships it as a .tres: no import step) for graphics that have no sprite.
@@ -1622,7 +1637,43 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 				# the Image of the same object may be configured before or after this component
 				ctl.set_meta("udon_mask_hidden", true)
 				ctl.self_modulate.a = 0.0
+		"HorizontalLayoutGroup", "VerticalLayoutGroup", "GridLayoutGroup":
+			# Unity's auto layout runs in udon_runtime (udon_layout_group.gd on a helper child)
+			var pd = keys.get("m_Padding", {})
+			var lay: Dictionary = {
+				"type": "grid" if kind == "GridLayoutGroup" else ("horizontal" if kind == "HorizontalLayoutGroup" else "vertical"),
+				"padding": [_to_int(pd.get("m_Left", 0)), _to_int(pd.get("m_Right", 0)), _to_int(pd.get("m_Top", 0)), _to_int(pd.get("m_Bottom", 0))] if pd is Dictionary else [0, 0, 0, 0],
+				"align": _to_int(keys.get("m_ChildAlignment", 0)),
+			}
+			if kind == "GridLayoutGroup":
+				lay["cell"] = keys.get("m_CellSize", Vector2(100, 100)) if keys.get("m_CellSize") is Vector2 else Vector2(100, 100)
+				lay["spacing2"] = keys.get("m_Spacing", Vector2.ZERO) if keys.get("m_Spacing") is Vector2 else Vector2.ZERO
+				lay["corner"] = _to_int(keys.get("m_StartCorner", 0))
+				lay["axis"] = _to_int(keys.get("m_StartAxis", 0))
+				lay["constraint"] = _to_int(keys.get("m_Constraint", 0))
+				lay["count"] = _to_int(keys.get("m_ConstraintCount", 2))
+			else:
+				lay["spacing"] = _to_float(keys.get("m_Spacing", 0.0))
+				# before Unity 2017.1 the groups always controlled their children's size
+				lay["control_w"] = _to_int(keys.get("m_ChildControlWidth", 1)) != 0
+				lay["control_h"] = _to_int(keys.get("m_ChildControlHeight", 1)) != 0
+				lay["expand_w"] = _to_int(keys.get("m_ChildForceExpandWidth", 1)) != 0
+				lay["expand_h"] = _to_int(keys.get("m_ChildForceExpandHeight", 1)) != 0
+				lay["reverse"] = _to_int(keys.get("m_ReverseArrangement", 0)) != 0
+			if _to_int(keys.get("m_Enabled", 1)) != 0:
+				ctl.set_meta("udon_layout", lay)
+				_ensure_layout_helper(ctl, state)
+		"ContentSizeFitter":
+			if _to_int(keys.get("m_Enabled", 1)) != 0:
+				ctl.set_meta("udon_fitter", {"h": _to_int(keys.get("m_HorizontalFit", 0)), "v": _to_int(keys.get("m_VerticalFit", 0))})
+				_ensure_layout_helper(ctl, state)
 		"LayoutElement":
+			ctl.set_meta("udon_layout_element", {
+				"min": Vector2(_to_float(keys.get("m_MinWidth", -1.0)), _to_float(keys.get("m_MinHeight", -1.0))),
+				"pref": Vector2(_to_float(keys.get("m_PreferredWidth", -1.0)), _to_float(keys.get("m_PreferredHeight", -1.0))),
+				"flex": Vector2(_to_float(keys.get("m_FlexibleWidth", -1.0)), _to_float(keys.get("m_FlexibleHeight", -1.0))),
+				"ignore": _to_int(keys.get("m_IgnoreLayout", 0)) != 0,
+			})
 			if _to_int(keys.get("m_IgnoreLayout", 0)) == 0:
 				var mn := Vector2(maxf(float(keys.get("m_MinWidth", -1.0)), float(keys.get("m_PreferredWidth", -1.0))), maxf(float(keys.get("m_MinHeight", -1.0)), float(keys.get("m_PreferredHeight", -1.0))))
 				ctl.custom_minimum_size = Vector2(maxf(mn.x, 0.0), maxf(mn.y, 0.0))
@@ -1655,7 +1706,7 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 				ctl.size = Vector2(ctl.size.x, ctl.size.x / ratio)
 			elif mode == 2:
 				ctl.size = Vector2(ctl.size.y * ratio, ctl.size.y)
-		"CanvasScaler", "GraphicRaycaster", "HorizontalLayoutGroup", "VerticalLayoutGroup", "GridLayoutGroup", "ContentSizeFitter", "EventSystem", "StandaloneInputModule", "VRC_UiShape":
+		"CanvasScaler", "GraphicRaycaster", "EventSystem", "StandaloneInputModule", "VRC_UiShape":
 			pass
 		_:
 			pass
