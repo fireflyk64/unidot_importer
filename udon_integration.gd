@@ -1241,11 +1241,11 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 
 var _white_tex: Texture2D = null
 
-## Shared 4 x 4 white texture (udon_runtime ships it) for graphics that have no sprite.
+## Shared 4 x 4 white texture (udon_runtime ships it as a .tres: no import step) for graphics that have no sprite.
 func _white_texture() -> Texture2D:
 	if _white_tex == null:
-		if ResourceLoader.exists("res://addons/udon_runtime/ui_white.png"):
-			_white_tex = load("res://addons/udon_runtime/ui_white.png")
+		if ResourceLoader.exists("res://addons/udon_runtime/ui_white.tres"):
+			_white_tex = load("res://addons/udon_runtime/ui_white.tres")
 		if _white_tex == null:
 			var img := Image.create(4, 4, false, Image.FORMAT_RGBA8)
 			img.fill(Color.WHITE)
@@ -1524,6 +1524,8 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 				# both get a white texture. The colour tints this graphic only, not its children.
 				ctl.texture = tex if tex != null else _white_texture()
 				ctl.self_modulate = col
+				if ctl.has_meta("udon_mask_hidden"):
+					ctl.self_modulate.a = 0.0  # a Mask that does not show its graphic (any order)
 				if _to_int(keys.get("m_PreserveAspect", 0)) != 0:
 					ctl.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 			else:
@@ -1534,6 +1536,8 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 			if ctl is TextureRect:
 				ctl.texture = tex2 if tex2 != null else _white_texture()
 				ctl.self_modulate = col2
+				if ctl.has_meta("udon_mask_hidden"):
+					ctl.self_modulate.a = 0.0
 			else:
 				_apply_background(ctl, tex2, col2, keys)
 		"Text":
@@ -1615,6 +1619,8 @@ func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, n
 		"Mask", "RectMask2D":
 			ctl.clip_contents = true
 			if kind == "Mask" and _to_int(keys.get("m_ShowMaskGraphic", 1)) == 0 and ctl is TextureRect:
+				# the Image of the same object may be configured before or after this component
+				ctl.set_meta("udon_mask_hidden", true)
 				ctl.self_modulate.a = 0.0
 		"LayoutElement":
 			if _to_int(keys.get("m_IgnoreLayout", 0)) == 0:
