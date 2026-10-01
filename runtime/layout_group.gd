@@ -13,6 +13,7 @@ extends Node
 ##   unidot_fitter  {h, v}          ContentSizeFitter: 0 unconstrained, 1 min size, 2 preferred size
 ##   unidot_aspect  {mode, ratio}   AspectRatioFitter: 1 width controls height, 2 height controls
 ##                                  width, 3 fit in parent, 4 envelope parent
+## (each may hold `enabled: false`: the component is disabled, its settings are kept)
 ## and any Control may carry
 ##   unidot_layout_element {min: Vector2, pref: Vector2, flex: Vector2, ignore, priority}
 ## with -1 for "not set" (Unity's LayoutElement).
@@ -101,7 +102,18 @@ func _root_helper() -> Node:
 
 
 static func _group(c: Control) -> Dictionary:
-	return c.get_meta("unidot_layout") if c != null and c.has_meta("unidot_layout") else {}
+	return _component(c, &"unidot_layout")
+
+
+## The settings of a layout component of `c`; empty when it has none or it is disabled
+## (`enabled: false`: the settings are kept for when a script enables it).
+static func _component(c: Control, key: StringName) -> Dictionary:
+	if c == null or not c.has_meta(key):
+		return {}
+	var cfg = c.get_meta(key)
+	if not (cfg is Dictionary) or not bool(cfg.get("enabled", true)):
+		return {}
+	return cfg
 
 
 ## Rebuild now (LayoutRebuilder.ForceRebuildLayoutImmediate), from the layout root.
@@ -198,7 +210,7 @@ static func _content_size(ctl: Control, axis: int) -> Vector2:
 	if ctl is TextureRect:
 		# an Image without a sprite asks for nothing (the importer gives it a small white texture)
 		var tex: Texture2D = ctl.texture
-		if tex != null and not ctl.has_meta("unidot_no_sprite"):
+		if tex != null and not bool(ctl.get_meta("unidot_no_sprite", false)):
 			return tex.get_size()
 		return Vector2.ZERO
 	return Vector2(-1, -1)
@@ -474,13 +486,13 @@ func _aspect(ctl: Control) -> void:
 func _control(ctl: Control, axis: int, shown: bool) -> void:
 	if not shown:
 		return
-	if ctl.has_meta("unidot_fitter"):
-		var f: Dictionary = ctl.get_meta("unidot_fitter")
+	var f: Dictionary = _component(ctl, &"unidot_fitter")
+	if not f.is_empty():
 		var mode: int = int(f.get("h" if axis == 0 else "v", 0))
 		if mode != 0:
 			var want: Array = _ask(ctl, axis)
 			_set_size(ctl, axis, want[0] if mode == 1 else want[1])
-	if axis == 1 and ctl.has_meta("unidot_aspect"):
+	if axis == 1 and not _component(ctl, &"unidot_aspect").is_empty():
 		_aspect(ctl)
 	var cfg: Dictionary = _group(ctl)
 	match str(cfg.get("type", "")):

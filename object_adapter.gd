@@ -114,6 +114,9 @@ class UnidotObject:
 	var utype: int = 0  # Not set in .meta files
 	var _cache_uniq_key: String = ""
 	var adapter: RefCounted = null  # RefCounted to containing scope.
+	# For the virtual object a prefab instance modification is applied through: the file id of
+	# the modified object in the file of the prefab (plugins recognize their components by it).
+	var modification_source_fileid: int = 0
 
 	# Log messages related to this asset
 	func log_debug(msg: String):
@@ -4623,6 +4626,7 @@ class UnidotPrefabInstance:
 			var target_skel_bone: String = target_prefab_meta.fileid_to_skeleton_bone.get(fileID, target_prefab_meta.prefab_fileid_to_skeleton_bone.get(fileID, ""))
 			var virtual_fileID = meta.xor_or_stripped(fileID, self.fileID)
 			var virtual_unidot_object: UnidotObject = adapter.instantiate_unidot_object_from_utype(meta, virtual_fileID, target_utype)
+			virtual_unidot_object.modification_source_fileid = fileID
 			var uprops: Dictionary = fileID_to_keys.get(fileID, {})
 			log_debug("XXXd Calculating prefab modifications " + str(target_prefab_meta.guid) + "/" + str(fileID) + "/" + str(target_nodepath) + ":" + target_skel_bone + " " + str(uprops))
 			if uprops.has("m_Name"):

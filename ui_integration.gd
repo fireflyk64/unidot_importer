@@ -29,6 +29,10 @@ const text_fit_script := preload("./runtime/ui_text_fit.gd")
 const Graphic := preload("./runtime/ui_graphic.gd")
 const UiText := preload("./runtime/ui_text.gd")
 
+## Metadata of a Control: {file id of a Unity UI component on its GameObject → kind}. Overrides
+## of a prefab instance name the component by that id.
+const META_COMPONENTS := &"unidot_ui"
+
 ## Unity UI / TextMeshPro component scripts by GUID.
 const UI_COMPONENTS := {
 	"fe87c0e1cc204ed48ad3b37840f39efc": "Image",
@@ -512,6 +516,10 @@ func _ensure_layout_helper(ctl: Control, state: RefCounted) -> void:
 ## Runtime behaviour of a UI object lives in helper children, not in a script on the Control:
 ## that slot is left to the scene's own scripts.
 func _ensure_helper(ctl: Control, state: RefCounted, helper_name: String, script: Script) -> void:
+	_add_helper(ctl, helper_name, script, state.owner if state.owner != null else ctl)
+
+
+func _add_helper(ctl: Control, helper_name: String, script: Script, owner: Node) -> void:
 	if ctl.get_node_or_null(helper_name) != null:
 		return
 	var helper := Node.new()
@@ -519,7 +527,7 @@ func _ensure_helper(ctl: Control, state: RefCounted, helper_name: String, script
 	helper.set_meta(RT.META_HELPER, true)
 	helper.set_script(script)
 	ctl.add_child(helper)
-	helper.owner = state.owner if state.owner != null else ctl
+	helper.owner = owner
 
 
 var _no_icon: Texture2D = null
@@ -576,6 +584,9 @@ func _ref_path(ref, obj: RefCounted, node: Node, meta_key: String, cfg_key: Stri
 ## Apply one Unity UI component to the Control of its GameObject.
 func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: Control) -> void:
 	state.add_fileID(ctl, obj)
+	var hosted: Dictionary = (ctl.get_meta(META_COMPONENTS) as Dictionary).duplicate() if ctl.has_meta(META_COMPONENTS) else {}
+	hosted[obj.fileID] = kind
+	ctl.set_meta(META_COMPONENTS, hosted)
 	var keys: Dictionary = obj.keys
 	match kind:
 		"Image", "RawImage":
@@ -715,12 +726,17 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 				lay["scale_w"] = _to_int(keys.get("m_ChildScaleWidth", 0)) != 0
 				lay["scale_h"] = _to_int(keys.get("m_ChildScaleHeight", 0)) != 0
 				lay["reverse"] = _to_int(keys.get("m_ReverseArrangement", 0)) != 0
+			if _to_int(keys.get("m_Enabled", 1)) == 0:
+				lay["enabled"] = false   # the settings are kept for a script that enables it
+			ctl.set_meta("unidot_layout", lay)
 			if _to_int(keys.get("m_Enabled", 1)) != 0:
-				ctl.set_meta("unidot_layout", lay)
 				_ensure_layout_helper(ctl, state)
 		"ContentSizeFitter":
+			var fitter: Dictionary = {"h": _to_int(keys.get("m_HorizontalFit", 0)), "v": _to_int(keys.get("m_VerticalFit", 0))}
+			if _to_int(keys.get("m_Enabled", 1)) == 0:
+				fitter["enabled"] = false
+			ctl.set_meta("unidot_fitter", fitter)
 			if _to_int(keys.get("m_Enabled", 1)) != 0:
-				ctl.set_meta("unidot_fitter", {"h": _to_int(keys.get("m_HorizontalFit", 0)), "v": _to_int(keys.get("m_VerticalFit", 0))})
 				_ensure_layout_helper(ctl, state)
 		"LayoutElement":
 			ctl.set_meta("unidot_layout_element", {
@@ -752,9 +768,12 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 			props["aspectMode"] = mode
 			props["aspectRatio"] = ratio
 			ctl.set_meta("unidot_props", props)
+			var aspect: Dictionary = {"mode": mode, "ratio": ratio}
+			if _to_int(keys.get("m_Enabled", 1)) == 0:
+				aspect["enabled"] = false
+			ctl.set_meta("unidot_aspect", aspect)
 			if mode != 0 and _to_int(keys.get("m_Enabled", 1)) != 0:
 				# the fitter follows the rect at run time (runtime/layout_group.gd)
-				ctl.set_meta("unidot_aspect", {"mode": mode, "ratio": ratio})
 				_ensure_layout_helper(ctl, state)
 		"CanvasScaler", "GraphicRaycaster", "EventSystem", "StandaloneInputModule":
 			pass
@@ -942,23 +961,348 @@ func _configure_tmp(ctl: Control, keys: Dictionary, _obj: RefCounted, state: Ref
 	if combined != 65535:
 		ha = combined & 0xFF
 		va = combined & 0xFF00
-	var h: int = HORIZONTAL_ALIGNMENT_LEFT
-	match ha:
-		2, 32:
-			h = HORIZONTAL_ALIGNMENT_CENTER
-		4:
-			h = HORIZONTAL_ALIGNMENT_RIGHT
-		8, 16:
-			h = HORIZONTAL_ALIGNMENT_FILL
-	var v: int = VERTICAL_ALIGNMENT_TOP
-	match va:
-		512, 2048, 4096, 8192:
-			v = VERTICAL_ALIGNMENT_CENTER
-		1024:
-			v = VERTICAL_ALIGNMENT_BOTTOM
+	var h: int = _tmp_halign(ha)
+	var v: int = _tmp_valign(va)
 	var col: Color = keys["m_fontColor"] if keys.get("m_fontColor") is Color else Color.WHITE
 	# TextMeshPro font assets are not converted: its default font's family stands in for all
 	_text_control(ctl, _tmp_settings(keys), col, _to_int(keys.get("m_Enabled", 1)) != 0, h, v, UiText.FONTS, state)
+
+
+# ---------------------------------------------------------------------------------------------
+# prefab instance overrides
+# ---------------------------------------------------------------------------------------------
+
+## Unity fields by which an overridden component is recognized when its file id is not known
+## (a component inside a nested prefab instance): first field of the property path → kinds.
+const _OVERRIDE_FIELDS := {
+	"TextMeshProUGUI": ["m_text", "m_fontSize", "m_fontStyle", "m_fontColor", "m_fontColor32", "m_enableAutoSizing", "m_fontSizeMin", "m_fontSizeMax", "m_enableWordWrapping", "m_TextWrappingMode", "m_overflowMode", "m_isRichText", "m_HorizontalAlignment", "m_VerticalAlignment", "m_textAlignment"],
+	"Text": ["m_Text", "m_FontData", "m_Color"],
+	"Image": ["m_Sprite", "m_Type", "m_PreserveAspect", "m_FillAmount", "m_FillMethod", "m_Color"],
+	"RawImage": ["m_Texture", "m_UVRect", "m_Color"],
+	"Toggle": ["m_IsOn", "graphic", "toggleTransition", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"Slider": ["m_Value", "m_MinValue", "m_MaxValue", "m_WholeNumbers", "m_Direction", "m_FillRect", "m_HandleRect", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"Scrollbar": ["m_Value", "m_Size", "m_Direction", "m_HandleRect", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"InputField": ["m_Text", "m_CharacterLimit", "m_TextComponent", "m_Placeholder", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"TMP_InputField": ["m_Text", "m_CharacterLimit", "m_TextComponent", "m_Placeholder", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"Dropdown": ["m_Value", "m_Options", "m_CaptionText", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"TMP_Dropdown": ["m_Value", "m_Options", "m_CaptionText", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"Button": ["m_OnClick", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"LayoutElement": ["m_IgnoreLayout", "m_MinWidth", "m_MinHeight", "m_PreferredWidth", "m_PreferredHeight", "m_FlexibleWidth", "m_FlexibleHeight", "m_LayoutPriority"],
+	"HorizontalLayoutGroup": ["m_Padding", "m_ChildAlignment", "m_Spacing", "m_ChildForceExpandWidth", "m_ChildForceExpandHeight", "m_ChildControlWidth", "m_ChildControlHeight", "m_ChildScaleWidth", "m_ChildScaleHeight", "m_ReverseArrangement"],
+	"VerticalLayoutGroup": ["m_Padding", "m_ChildAlignment", "m_Spacing", "m_ChildForceExpandWidth", "m_ChildForceExpandHeight", "m_ChildControlWidth", "m_ChildControlHeight", "m_ChildScaleWidth", "m_ChildScaleHeight", "m_ReverseArrangement"],
+	"GridLayoutGroup": ["m_Padding", "m_ChildAlignment", "m_Spacing", "m_CellSize", "m_StartCorner", "m_StartAxis", "m_Constraint", "m_ConstraintCount"],
+	"ContentSizeFitter": ["m_HorizontalFit", "m_VerticalFit"],
+	"AspectRatioFitter": ["m_AspectMode", "m_AspectRatio"],
+	"Mask": ["m_ShowMaskGraphic"],
+}
+
+
+## A UI component of a prefab instance is overridden (`uprops`: Unity property path → value;
+## struct members arrive one by one, `m_Color.r`). The component's settings live in metadata, so
+## the override is a change of that metadata, rendered by the same run-time modules. → true when
+## the component is one of ours (the default would turn `m_Enabled` into the node's visibility,
+## hiding the whole object with its children).
+func convert_monobehaviour_properties(obj: RefCounted, node: Node, uprops: Dictionary) -> bool:
+	var ctl: Control = control_of(node)
+	if ctl == null or not ctl.has_meta(META_COMPONENTS):
+		return false
+	var kinds: Dictionary = ctl.get_meta(META_COMPONENTS)
+	var kind: String = str(kinds.get(obj.modification_source_fileid, ""))
+	if kind == "":
+		# by the fields: the first component of the object that has one of them
+		var fields: Dictionary = {}
+		for key in uprops:
+			fields[str(key).get_slice(".", 0)] = true
+		for candidate in kinds.values():
+			for field in _OVERRIDE_FIELDS.get(candidate, []):
+				if fields.has(field):
+					kind = candidate
+					break
+			if kind != "":
+				break
+	if kind == "":
+		if uprops.size() == 1 and uprops.has("m_Enabled") and kinds.size() == 1:
+			kind = str(kinds.values()[0])
+		else:
+			return false
+	_override_component(kind, ctl, uprops, obj)
+	stats["overrides"] = int(stats.get("overrides", 0)) + 1
+	return true
+
+
+## A colour given whole or by members (`key.r` ...), over `base`.
+func _color_override(uprops: Dictionary, key: String, base: Color) -> Color:
+	if uprops.get(key) is Color:
+		return uprops[key]
+	var c: Color = base
+	for member in ["r", "g", "b", "a"]:
+		if uprops.has(key + "." + member):
+			c[member] = _to_float(uprops[key + "." + member])
+	return c
+
+
+func _has_field(uprops: Dictionary, field: String) -> bool:
+	for key in uprops:
+		if str(key) == field or str(key).begins_with(field + "."):
+			return true
+	return false
+
+
+func _override_component(kind: String, ctl: Control, uprops: Dictionary, obj: RefCounted) -> void:
+	match kind:
+		"TextMeshProUGUI", "Text":
+			_override_text(kind == "TextMeshProUGUI", ctl, uprops)
+		"Image", "RawImage":
+			var graphic: Dictionary = {}
+			if _has_field(uprops, "m_Color"):
+				graphic["color"] = _color_override(uprops, "m_Color", Graphic.color(ctl))
+			if uprops.has("m_Enabled"):
+				graphic["enabled"] = _to_int(uprops["m_Enabled"]) != 0
+			var tex_key: String = "m_Sprite" if kind == "Image" else "m_Texture"
+			if typeof(uprops.get(tex_key)) == TYPE_ARRAY:
+				var tex: Texture2D = _sprite_texture(uprops[tex_key], obj)
+				if ctl is TextureRect:
+					ctl.texture = tex if tex != null else _white_texture()
+					ctl.set_meta("unidot_no_sprite", tex == null)
+				else:
+					graphic["texture"] = tex
+			if ctl is TextureRect and uprops.has("m_PreserveAspect"):
+				ctl.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED if _to_int(uprops["m_PreserveAspect"]) != 0 else TextureRect.STRETCH_SCALE
+			if not graphic.is_empty():
+				Graphic.update(ctl, graphic)
+		"Button", "Toggle", "Slider", "Scrollbar", "InputField", "TMP_InputField", "Dropdown", "TMP_Dropdown":
+			_override_selectable(kind, ctl, uprops)
+		"Mask":
+			if uprops.has("m_ShowMaskGraphic") or uprops.has("m_Enabled"):
+				var mask_on: bool = _to_int(uprops.get("m_Enabled", 1)) != 0
+				Graphic.update(ctl, {"hidden": mask_on and _to_int(uprops.get("m_ShowMaskGraphic", 0 if Graphic.state(ctl)["hidden"] else 1)) == 0})
+			if uprops.has("m_Enabled"):
+				ctl.clip_contents = _to_int(uprops["m_Enabled"]) != 0
+		"RectMask2D":
+			if uprops.has("m_Enabled"):
+				ctl.clip_contents = _to_int(uprops["m_Enabled"]) != 0
+		"LayoutElement":
+			var le: Dictionary = (ctl.get_meta("unidot_layout_element") as Dictionary).duplicate() if ctl.has_meta("unidot_layout_element") else {"min": Vector2(-1, -1), "pref": Vector2(-1, -1), "flex": Vector2(-1, -1), "ignore": false, "priority": 1, "enabled": true}
+			for entry in [["m_MinWidth", "min", 0], ["m_MinHeight", "min", 1], ["m_PreferredWidth", "pref", 0], ["m_PreferredHeight", "pref", 1], ["m_FlexibleWidth", "flex", 0], ["m_FlexibleHeight", "flex", 1]]:
+				if uprops.has(entry[0]):
+					var v2: Vector2 = le[entry[1]]
+					v2[entry[2]] = _to_float(uprops[entry[0]])
+					le[entry[1]] = v2
+			if uprops.has("m_IgnoreLayout"):
+				le["ignore"] = _to_int(uprops["m_IgnoreLayout"]) != 0
+			if uprops.has("m_LayoutPriority"):
+				le["priority"] = _to_int(uprops["m_LayoutPriority"])
+			if uprops.has("m_Enabled"):
+				le["enabled"] = _to_int(uprops["m_Enabled"]) != 0
+			ctl.set_meta("unidot_layout_element", le)
+		"HorizontalLayoutGroup", "VerticalLayoutGroup", "GridLayoutGroup":
+			if not ctl.has_meta("unidot_layout"):
+				return
+			var lay: Dictionary = (ctl.get_meta("unidot_layout") as Dictionary).duplicate()
+			var pad: Array = (lay.get("padding", [0, 0, 0, 0]) as Array).duplicate()
+			for entry in [["m_Padding.m_Left", 0], ["m_Padding.m_Right", 1], ["m_Padding.m_Top", 2], ["m_Padding.m_Bottom", 3]]:
+				if uprops.has(entry[0]):
+					pad[entry[1]] = _to_int(uprops[entry[0]])
+			lay["padding"] = pad
+			if uprops.has("m_ChildAlignment"):
+				lay["align"] = _to_int(uprops["m_ChildAlignment"])
+			if kind == "GridLayoutGroup":
+				for entry in [["m_CellSize", "cell"], ["m_Spacing", "spacing2"]]:
+					var v2: Vector2 = lay.get(entry[1], Vector2.ZERO)
+					if uprops.get(entry[0]) is Vector2:
+						v2 = uprops[entry[0]]
+					if uprops.has(entry[0] + ".x"):
+						v2.x = _to_float(uprops[entry[0] + ".x"])
+					if uprops.has(entry[0] + ".y"):
+						v2.y = _to_float(uprops[entry[0] + ".y"])
+					lay[entry[1]] = v2
+				for entry in [["m_StartCorner", "corner"], ["m_StartAxis", "axis"], ["m_Constraint", "constraint"], ["m_ConstraintCount", "count"]]:
+					if uprops.has(entry[0]):
+						lay[entry[1]] = _to_int(uprops[entry[0]])
+			else:
+				if uprops.has("m_Spacing"):
+					lay["spacing"] = _to_float(uprops["m_Spacing"])
+				for entry in [["m_ChildControlWidth", "control_w"], ["m_ChildControlHeight", "control_h"], ["m_ChildForceExpandWidth", "expand_w"], ["m_ChildForceExpandHeight", "expand_h"],
+						["m_ChildScaleWidth", "scale_w"], ["m_ChildScaleHeight", "scale_h"], ["m_ReverseArrangement", "reverse"]]:
+					if uprops.has(entry[0]):
+						lay[entry[1]] = _to_int(uprops[entry[0]]) != 0
+			_override_enabled(lay, uprops)
+			ctl.set_meta("unidot_layout", lay)
+			if bool(lay.get("enabled", true)):
+				_add_helper(ctl, "UnidotLayout", layout_group_script, _scene_root(ctl))
+		"ContentSizeFitter":
+			var fit: Dictionary = (ctl.get_meta("unidot_fitter") as Dictionary).duplicate() if ctl.has_meta("unidot_fitter") else {"h": 0, "v": 0}
+			if uprops.has("m_HorizontalFit"):
+				fit["h"] = _to_int(uprops["m_HorizontalFit"])
+			if uprops.has("m_VerticalFit"):
+				fit["v"] = _to_int(uprops["m_VerticalFit"])
+			_override_enabled(fit, uprops)
+			ctl.set_meta("unidot_fitter", fit)
+			if bool(fit.get("enabled", true)):
+				_add_helper(ctl, "UnidotLayout", layout_group_script, _scene_root(ctl))
+		"AspectRatioFitter":
+			var asp: Dictionary = (ctl.get_meta("unidot_aspect") as Dictionary).duplicate() if ctl.has_meta("unidot_aspect") else {"mode": 0, "ratio": 1.0}
+			if uprops.has("m_AspectMode"):
+				asp["mode"] = _to_int(uprops["m_AspectMode"])
+			if uprops.has("m_AspectRatio"):
+				asp["ratio"] = maxf(_to_float(uprops["m_AspectRatio"]), 0.001)
+			_override_enabled(asp, uprops)
+			ctl.set_meta("unidot_aspect", asp)
+			if bool(asp.get("enabled", true)) and int(asp["mode"]) != 0:
+				_add_helper(ctl, "UnidotLayout", layout_group_script, _scene_root(ctl))
+		_:
+			pass
+
+
+func _override_text(tmp: bool, ctl: Control, uprops: Dictionary) -> void:
+	var changes: Dictionary = {}
+	var fields: Array = [["m_text", "text"], ["m_fontSize", "size"], ["m_fontStyle", "style"], ["m_enableAutoSizing", "auto"], ["m_fontSizeMin", "min"], ["m_fontSizeMax", "max"], ["m_overflowMode", "overflow"], ["m_isRichText", "rich"]]
+	if not tmp:
+		fields = [["m_Text", "text"], ["m_FontData.m_FontSize", "size"], ["m_FontData.m_FontStyle", "style"], ["m_FontData.m_BestFit", "auto"], ["m_FontData.m_MinSize", "min"], ["m_FontData.m_MaxSize", "max"], ["m_FontData.m_RichText", "rich"]]
+	for entry in fields:
+		if not uprops.has(entry[0]):
+			continue
+		var v = uprops[entry[0]]
+		match entry[1]:
+			"text":
+				changes["text"] = str(v) if v != null else ""
+			"size", "min", "max":
+				changes[entry[1]] = _to_float(v)
+			"style":
+				changes["style"] = _to_int(v) if tmp else (_to_int(v) & 3)
+			"overflow":
+				changes["overflow"] = _to_int(v)
+			_:
+				changes[entry[1]] = _to_int(v) != 0
+	var current: Dictionary = UiText.settings(ctl)
+	if tmp:
+		if uprops.has("m_TextWrappingMode"):
+			changes["wrap"] = _to_int(uprops["m_TextWrappingMode"]) in [1, 2]
+		elif uprops.has("m_enableWordWrapping"):
+			changes["wrap"] = _to_int(uprops["m_enableWordWrapping"]) != 0
+	elif uprops.has("m_FontData.m_HorizontalOverflow") or uprops.has("m_FontData.m_VerticalOverflow"):
+		var wraps: bool = _to_int(uprops["m_FontData.m_HorizontalOverflow"]) == 0 if uprops.has("m_FontData.m_HorizontalOverflow") else bool(current["wrap"])
+		var cut: bool = _to_int(uprops["m_FontData.m_VerticalOverflow"]) == 0 if uprops.has("m_FontData.m_VerticalOverflow") else int(current["overflow"]) != 0
+		changes["wrap"] = wraps
+		changes["overflow"] = 3 if wraps and cut else 0
+	if ctl is RichTextLabel:
+		if tmp:
+			var ha: int = _to_int(uprops.get("m_HorizontalAlignment", -1))
+			var va: int = _to_int(uprops.get("m_VerticalAlignment", -1))
+			if _to_int(uprops.get("m_textAlignment", 65535)) != 65535:
+				ha = _to_int(uprops["m_textAlignment"]) & 0xFF
+				va = _to_int(uprops["m_textAlignment"]) & 0xFF00
+			if ha >= 0:
+				ctl.horizontal_alignment = _tmp_halign(ha)
+			if va >= 0:
+				ctl.vertical_alignment = _tmp_valign(va)
+		elif uprops.has("m_FontData.m_Alignment"):
+			var align: int = _to_int(uprops["m_FontData.m_Alignment"])
+			ctl.horizontal_alignment = [HORIZONTAL_ALIGNMENT_LEFT, HORIZONTAL_ALIGNMENT_CENTER, HORIZONTAL_ALIGNMENT_RIGHT][align % 3]
+			ctl.vertical_alignment = [VERTICAL_ALIGNMENT_TOP, VERTICAL_ALIGNMENT_CENTER, VERTICAL_ALIGNMENT_BOTTOM][clampi(int(align / 3), 0, 2)]
+		if not changes.is_empty() and ctl.has_meta(UiText.META):
+			UiText.update(ctl, changes)
+			if bool(changes.get("auto", false)):
+				_add_helper(ctl, UiText.HELPER, text_fit_script, _scene_root(ctl))
+	var color_key: String = "m_fontColor" if tmp else "m_Color"
+	var graphic: Dictionary = {}
+	if _has_field(uprops, color_key):
+		graphic["color"] = _color_override(uprops, color_key, Graphic.color(ctl))
+	if uprops.has("m_Enabled"):
+		graphic["enabled"] = _to_int(uprops["m_Enabled"]) != 0
+	if not graphic.is_empty() and ctl is RichTextLabel:
+		Graphic.update(ctl, graphic)
+
+
+## `m_Enabled` of a layout component: the settings stay, with `enabled: false` (an instance
+## cannot store the removal of metadata its prefab has).
+func _override_enabled(cfg: Dictionary, uprops: Dictionary) -> void:
+	if uprops.has("m_Enabled"):
+		if _to_int(uprops["m_Enabled"]) != 0:
+			cfg.erase("enabled")
+		else:
+			cfg["enabled"] = false
+
+
+## The root of the scene being built that `n` is in (the owner of everything saved with it).
+func _scene_root(n: Node) -> Node:
+	var o: Node = n
+	while o.owner != null:
+		o = o.owner
+	return o
+
+
+func _override_selectable(kind: String, ctl: Control, uprops: Dictionary) -> void:
+	var cfg: Dictionary = (ctl.get_meta(selectable_script.META) as Dictionary).duplicate(true) if ctl.has_meta(selectable_script.META) else {"transition": 1}
+	if uprops.has("m_Interactable"):
+		var on: bool = _to_int(uprops["m_Interactable"]) != 0
+		if ctl is BaseButton:
+			ctl.disabled = not on
+		elif ctl is Slider or ctl is LineEdit:
+			ctl.editable = on
+	if uprops.has("m_Transition"):
+		cfg["transition"] = _to_int(uprops["m_Transition"])
+	if _has_field(uprops, "m_Colors"):
+		var block: Dictionary = selectable_script.DEFAULT_COLORS.duplicate()
+		block.merge(cfg.get("colors", {}), true)
+		for pair in [["m_Colors.m_NormalColor", "normalColor"], ["m_Colors.m_HighlightedColor", "highlightedColor"], ["m_Colors.m_PressedColor", "pressedColor"], ["m_Colors.m_SelectedColor", "selectedColor"], ["m_Colors.m_DisabledColor", "disabledColor"]]:
+			if _has_field(uprops, pair[0]):
+				block[pair[1]] = _color_override(uprops, pair[0], block[pair[1]])
+		if uprops.has("m_Colors.m_ColorMultiplier"):
+			block["colorMultiplier"] = _to_float(uprops["m_Colors.m_ColorMultiplier"])
+		if uprops.has("m_Colors.m_FadeDuration"):
+			block["fadeDuration"] = _to_float(uprops["m_Colors.m_FadeDuration"])
+		cfg["colors"] = block
+	if uprops.has("m_Direction") and kind in ["Slider", "Scrollbar"]:
+		cfg["direction"] = _to_int(uprops["m_Direction"])
+	ctl.set_meta(selectable_script.META, cfg)
+	match kind:
+		"Toggle":
+			if uprops.has("m_IsOn") and ctl is BaseButton:
+				ctl.button_pressed = _to_int(uprops["m_IsOn"]) != 0
+		"Slider", "Scrollbar":
+			if ctl is Range:
+				if kind == "Slider":
+					if uprops.has("m_MinValue"):
+						ctl.min_value = _to_float(uprops["m_MinValue"])
+					if uprops.has("m_MaxValue"):
+						ctl.max_value = _to_float(uprops["m_MaxValue"])
+					if uprops.has("m_WholeNumbers"):
+						ctl.rounded = _to_int(uprops["m_WholeNumbers"]) != 0
+						ctl.step = 1.0 if ctl.rounded else 0.0
+				if uprops.has("m_Value"):
+					ctl.value = _to_float(uprops["m_Value"])
+		"InputField", "TMP_InputField":
+			if ctl is LineEdit:
+				if uprops.has("m_Text"):
+					ctl.text = str(uprops["m_Text"]) if uprops["m_Text"] != null else ""
+				if uprops.has("m_CharacterLimit"):
+					ctl.max_length = _to_int(uprops["m_CharacterLimit"])
+		"Dropdown", "TMP_Dropdown":
+			if ctl is OptionButton and uprops.has("m_Value"):
+				ctl.selected = _to_int(uprops["m_Value"])
+	# (what the selectable drives - tint, check mark, fill and handle - follows when the scene
+	# is complete: _finish_widgets)
+
+
+func _tmp_halign(ha: int) -> int:
+	match ha:
+		2, 32:
+			return HORIZONTAL_ALIGNMENT_CENTER
+		4:
+			return HORIZONTAL_ALIGNMENT_RIGHT
+		8, 16:
+			return HORIZONTAL_ALIGNMENT_FILL
+	return HORIZONTAL_ALIGNMENT_LEFT
+
+
+func _tmp_valign(va: int) -> int:
+	match va:
+		512, 2048, 4096, 8192:
+			return VERTICAL_ALIGNMENT_CENTER
+		1024:
+			return VERTICAL_ALIGNMENT_BOTTOM
+	return VERTICAL_ALIGNMENT_TOP
 
 
 func _to_float(v) -> float:

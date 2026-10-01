@@ -252,6 +252,7 @@ func _world_canvas() -> void:
 	near(holder.position, Vector3(1, 2, 3), "the holder sits at the canvas's anchored position (x mirrored)")
 	near(RT.rect_size(holder), Vector2(200, 100), "canvas rect size")
 	near(RT.world_position(holder), Vector3(-1, 2, 3), "canvas world position (Unity space)")
+	ok(not (croot.get_viewport() as SubViewport).gui_snap_controls_to_pixels, "the canvas viewport does not snap controls to whole canvas units")
 	var img: TextureRect = _image(croot, "Img", {"anchored_position": Vector2(50, 25), "size_delta": Vector2(40, 20)})
 	# far outside the canvas rect: Unity world canvases do not clip
 	var far: TextureRect = _image(croot, "Far", {"anchored_position": Vector2(300, -200), "size_delta": Vector2(20, 20)})

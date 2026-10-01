@@ -57,6 +57,10 @@ func apply() -> void:
 	for side in [SIDE_LEFT, SIDE_TOP, SIDE_RIGHT, SIDE_BOTTOM]:
 		root.set_anchor(side, 0.0, false, false)
 	root.position = Vector2.ZERO
+	if not is_equal_approx(f, 1.0) and get_viewport().gui_snap_controls_to_pixels:
+		# canvas units are not pixels any more: Godot would round every control's origin to a
+		# whole unit of its parent's space when drawing
+		get_viewport().gui_snap_controls_to_pixels = false
 	root.scale = Vector2(f, f)
 	root.size = screen / f
 	cfg["size"] = root.size

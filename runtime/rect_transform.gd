@@ -809,6 +809,10 @@ static func build_island(holder: Node3D, root: Control, rect_values: Dictionary,
 	vp.transparent_bg = true
 	vp.disable_3d = true
 	vp.gui_embed_subwindows = true
+	# Godot rounds the origin of every control to a whole unit of its parent's space ("snap
+	# controls to pixels"). The units of a canvas are not pixels: on a canvas in metres that
+	# moves a control by up to half a metre in what is rendered (never in its transform).
+	vp.gui_snap_controls_to_pixels = false
 	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	vp.set_meta(META_HELPER, true)
 	holder.add_child(vp, true)
@@ -1061,6 +1065,9 @@ static func sync_island(holder: Node) -> void:
 		return
 	_island_resized(holder)
 	cfg = _own_cfg(holder)
+	var svp: SubViewport = holder.get_node_or_null(cfg.get("viewport", NodePath())) as SubViewport
+	if svp != null and svp.gui_snap_controls_to_pixels:
+		svp.gui_snap_controls_to_pixels = false   # (a scene built before build_island turned it off)
 	var nested: bool = is_nested(holder)
 	var wm: Transform3D = world_matrix(holder)
 	var density: float = maxf(pixels_per_metre() * maxf(wm.basis.x.length(), 1e-6), 0.01)
