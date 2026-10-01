@@ -9,8 +9,10 @@ extends RefCounted
 ## to the nodes unidot creates for UdonSharp behaviours, fills their exported fields from the
 ## serialized MonoBehaviour (references are resolved once the whole scene exists), marks VRChat
 ## SDK components (pickups, stations, object sync/pool, mirrors, video players, scene descriptor)
-## for the udon_runtime adapters, converts Unity UI hierarchies to Control nodes and wires
-## UnityEvent persistent calls (Button.onClick → UdonBehaviour.SendCustomEvent).
+## for the udon_runtime adapters, and wires the UnityEvent persistent calls of Unity UI components
+## (Button.onClick → UdonBehaviour.SendCustomEvent). The UI itself (Canvas, RectTransform, uGUI /
+## TextMeshPro components) is converted by unidot's ui_integration.gd, which hands this plugin
+## the events through `ui_unity_event`.
 ##
 ## Enable it with the project settings
 ##   unidot/extra_plugins = ["res://addons/unidot_importer/udon_integration.gd"]
@@ -18,6 +20,7 @@ extends RefCounted
 ## A diagnostics report is written to `udon/import_report` (default res://udon_import_report.json).
 
 const UdonOdin := preload("./udon_odin.gd")
+const RT := preload("./runtime/rect_transform.gd")
 const UDON_BEHAVIOUR_GUID := "45115577ef41a5b4ca741ed302693907"
 
 ## VRChat SDK component scripts by GUID (asset packages rarely ship the SDK, so the field
@@ -38,38 +41,6 @@ const VRCSDK3_DLL_CLASSES := {
 	-17141911: "VRC_SceneDescriptor",
 	454367647: "VRCObjectPool",
 }
-
-## Unity UI / TextMeshPro component scripts by GUID.
-const UI_COMPONENTS := {
-	"fe87c0e1cc204ed48ad3b37840f39efc": "Image",
-	"1344c3c82d62a2a41a3576d8abb8e3ea": "RawImage",
-	"5f7201a12d95ffc409449d95f23cf332": "Text",
-	"4e29b1a8efbd4b44bb3f3716e73f07ff": "Button",
-	"9085046f02f69544eb97fd06b6048fe2": "Toggle",
-	"67db9e8f0e2ae9c40bc1e2b64352a6b4": "Slider",
-	"2a4db7a114972834c8e4117be1d82ba3": "Scrollbar",
-	"d199490a83bb2b844b9695cbf13b01ef": "InputField",
-	"0d1c2a8fe1a7b7a4d9edbdc6bf0d0d5b": "Dropdown",
-	"1aa08ab6e0800fa44ae55d278d1423e3": "ScrollRect",
-	"0cd44c1031e13a943bb63640046fad76": "CanvasScaler",
-	"dc42784cf147c0c48a680349fa168899": "GraphicRaycaster",
-	"31a19414c41e5ae4aae2af33fee712f6": "Mask",
-	"3312d7739989d2b4e91e6319e9a96d76": "RectMask2D",
-	"306cc8c2b49d7114eaa3623786fc2126": "LayoutElement",
-	"30649d3a9faa99c48a7b1166b86bf2a0": "HorizontalLayoutGroup",
-	"59f8146938fff824cb5fd77236b75775": "VerticalLayoutGroup",
-	"8a8695521f0d02e499659fee002a26c2": "GridLayoutGroup",
-	"3245ec927659c4140ac4f8d17403cc18": "ContentSizeFitter",
-	"e19747de3f5aca642ab2be37e372fb86": "Outline",
-	"76c392e42b5098c458856cdf6ecaaaa1": "EventSystem",
-	"4f231c4fb786f3946a6b90b886c48677": "StandaloneInputModule",
-	"f4688fdb7df04437aeb418b961361dc5": "TextMeshProUGUI",
-	"9541d86e2fd84c1d9990edf0852d74ab": "TextMeshPro",
-	"2da0c512f12947e489f739169773d7ca": "TMP_InputField",
-}
-
-## Unity UI components that decide the Control class of a RectTransform GameObject (first wins).
-const UI_PRIMARY_ORDER := ["Button", "Toggle", "Slider", "Scrollbar", "InputField", "TMP_InputField", "VRCUrlInputField", "Dropdown", "TMP_Dropdown", "ScrollRect", "Text", "TextMeshProUGUI", "Image", "RawImage"]
 
 var database = null
 var manifest_path: String = ""
@@ -139,12 +110,36 @@ func handle_monobehaviour(obj: RefCounted, state: RefCounted, node: Node, _exist
 		return null
 	var kind: String = _identify_component(guid, keys, _to_int(obj.monoscript[1]))
 	if kind == "":
-		_note_unknown(guid, obj, node)
+		# Unity UI components belong to unidot's own UI conversion
+		var ui = _ui_plugin()
+		if ui == null or ui.identify(guid, keys, _to_int(obj.monoscript[1]), obj.meta) == "":
+			_note_unknown(guid, obj, node)
 		return null
-	if UI_COMPONENTS.values().has(kind) or kind in ["VRCUrlInputField", "TMP_Dropdown", "VRC_UiShape", "Shadow", "AspectRatioFitter"]:
-		_configure_ui_component(kind, obj, state, node)
+	if kind in UI_KINDS:
 		return null
 	_mark_component(kind, obj, state, node)
+	return null
+
+
+## VRChat SDK components that are UI as far as the importer is concerned (see ui_component_kind).
+const UI_KINDS := ["VRC_UiShape", "VRCUrlInputField"]
+
+
+## Hook of ui_integration.gd: UI component scripts it cannot know. A VRCUrlInputField is an
+## InputField whose text is a URL; a VRC_UiShape only makes a canvas clickable in VRChat.
+func ui_component_kind(guid: String, keys: Dictionary, file_id: int) -> String:
+	var kind: String = _identify_component(guid, keys, file_id)
+	if kind == "VRCUrlInputField":
+		return "InputField"
+	return ""
+
+
+func _ui_plugin():
+	if database == null:
+		return null
+	for plugin in database.get_enabled_plugins():
+		if plugin != self and plugin.has_method("identify") and plugin.has_method("configure_component"):
+			return plugin
 	return null
 
 
@@ -163,8 +158,6 @@ func initialize_skelleys(_state: RefCounted, _objs: Array, _is_prefab: bool):
 func setup_post_children(game_object: RefCounted, state: RefCounted, node: Node, _avatar_meta: RefCounted):
 	if node == null:
 		return
-	if node.has_meta("udon_canvas") and str(node.get_meta("udon_canvas").get("mode", "")) == "world":
-		_finalize_world_canvas(node)
 	# Inactive GameObjects: unidot hides them; udon_runtime's SetActive/activeSelf use process_mode
 	# (no Start/Update/OnEnable until a script activates them), so mirror it here.
 	if "enabled" in game_object and not game_object.enabled:
@@ -276,7 +269,7 @@ func convert_monobehaviour_properties(obj: RefCounted, node: Node, uprops: Dicti
 				_apply_override(found[0], found[1], str(key), uprops[key], obj, node)
 			return true
 	var kind: String = _identify_component(guid, obj.keys, _to_int(obj.monoscript[1]))
-	if kind != "" and not UI_COMPONENTS.values().has(kind):
+	if kind != "" and not (kind in UI_KINDS):
 		var meta_key: String = _component_meta_key(kind)
 		var cfg2: Dictionary = node.get_meta(meta_key) if node.has_meta(meta_key) else {}
 		var conv: Dictionary = _component_config(kind, uprops, obj, node)
@@ -868,6 +861,7 @@ func _prefab_template(guid: String, found_meta: Resource, ref: Array, scene_cont
 		_report["missing_resources"].append({"field": what, "ref": guid + ":" + str(ref[1]), "reason": "not a scene: " + path})
 		return null
 	var inst: Node = ps.instantiate()
+	RT.apply_prefab_rect(inst)   # a UI prefab's root gets its own rect when it is instanced
 	inst.name = "P_" + guid
 	inst.set_meta("udon_prefab_template", true)
 	container.add_child(inst, true)
@@ -914,16 +908,10 @@ func _identify_component(guid: String, keys: Dictionary, file_id: int = 0) -> St
 		return VRCSDK3_DLL_CLASSES[file_id]
 	if KNOWN_COMPONENTS.has(guid):
 		return KNOWN_COMPONENTS[guid]
-	if UI_COMPONENTS.has(guid):
-		return UI_COMPONENTS[guid]
 	var extra: Variant = ProjectSettings.get_setting("udon/component_guids", {})
 	if extra is Dictionary and extra.has(guid):
 		return str(extra[guid])
 	# field-signature fallback (works without the SDK sources)
-	if keys.has("m_EffectColor") and keys.has("m_EffectDistance"):
-		return "Shadow"
-	if keys.has("m_AspectMode") and keys.has("m_AspectRatio"):
-		return "AspectRatioFitter"
 	if keys.has("pickupable") and keys.has("AutoHold"):
 		return "VRC_Pickup"
 	if keys.has("PlayerMobility") and keys.has("disableStationExit"):
@@ -944,26 +932,6 @@ func _identify_component(guid: String, keys: Dictionary, file_id: int = 0) -> St
 		return "VRCVideoPlayer"
 	if keys.has("Gain") and keys.has("Far") and keys.has("EnableSpatialization"):
 		return "VRCSpatialAudioSource"
-	if keys.has("m_TextComponent") and keys.has("m_CharacterLimit"):
-		return "TMP_InputField" if keys.has("m_FontAsset") else "InputField"
-	if keys.has("m_CaptionText") and keys.has("m_Options"):
-		return "TMP_Dropdown" if keys.has("m_ItemText") and keys.has("m_AlphaFadeSpeed") else "Dropdown"
-	if keys.has("m_OnClick") and keys.has("m_Interactable"):
-		return "Button"
-	if keys.has("m_IsOn") and keys.has("toggleTransition"):
-		return "Toggle"
-	if keys.has("m_Direction") and keys.has("m_MinValue"):
-		return "Slider"
-	if keys.has("m_FontData") and keys.has("m_Text"):
-		return "Text"
-	if keys.has("m_text") and keys.has("m_fontAsset"):
-		return "TextMeshProUGUI"
-	if keys.has("m_Sprite") and keys.has("m_Type") and keys.has("m_FillMethod"):
-		return "Image"
-	if keys.has("m_Content") and keys.has("m_Horizontal") and keys.has("m_Vertical"):
-		return "ScrollRect"
-	if keys.has("m_Texture") and keys.has("m_UVRect"):
-		return "RawImage"
 	return ""
 
 
@@ -1167,667 +1135,13 @@ func _note_unknown(guid: String, obj: RefCounted, node: Node) -> void:
 
 
 # ---------------------------------------------------------------------------------------------
-# Unity UI → Control nodes
+# UnityEvents of Unity UI components (the UI itself is converted by unidot's ui_integration.gd)
 # ---------------------------------------------------------------------------------------------
-
-## GameObjects with a RectTransform become Controls; the class follows the main UI component.
-func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node) -> Node:
-	var transform = go.transform
-	if transform == null or transform.type != "RectTransform":
-		return null
-	if go.GetComponent("Canvas") != null and not _inside_canvas(new_parent):
-		return null  # a top-level Canvas GameObject stays a Node3D; see children_parent()
-	var primary: String = ""
-	var kinds: Array = []
-	var kind_keys: Dictionary = {}
-	for component_ref in go.components:
-		var component = go.meta.lookup(component_ref.values()[0])
-		if component == null or component.type != "MonoBehaviour":
-			continue
-		var g: String = str(component.monoscript[2]) if component.monoscript[2] != null else ""
-		var kind: String = _identify_component(g, component.keys, _to_int(component.monoscript[1]))
-		if kind != "":
-			kinds.append(kind)
-			kind_keys[kind] = component.keys
-	for k in UI_PRIMARY_ORDER:
-		if kinds.has(k):
-			primary = k
-			break
-	# Unity's Direction: 0 LeftToRight, 1 RightToLeft, 2 BottomToTop, 3 TopToBottom
-	var vertical: bool = _to_int(kind_keys.get(primary, {}).get("m_Direction", 0)) >= 2
-	var node: Control
-	match primary:
-		"Button":
-			node = Button.new()
-			node.flat = true
-		"Toggle":
-			node = Button.new()
-			node.toggle_mode = true
-			node.flat = true
-		"Slider":
-			node = VSlider.new() if vertical else HSlider.new()
-		"Scrollbar":
-			# a real scroll bar: scripts find it as a Scrollbar and a ScrollRect links to it
-			node = VScrollBar.new() if vertical else HScrollBar.new()
-		"InputField", "TMP_InputField", "VRCUrlInputField":
-			node = LineEdit.new()
-		"Dropdown", "TMP_Dropdown":
-			node = OptionButton.new()
-		"ScrollRect":
-			node = ScrollContainer.new()
-		"Text":
-			node = Label.new()
-		"TextMeshProUGUI":
-			node = RichTextLabel.new()
-			node.bbcode_enabled = true
-			node.scroll_active = false
-			node.fit_content = false
-		"Image", "RawImage":
-			node = TextureRect.new()
-			node.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			node.stretch_mode = TextureRect.STRETCH_SCALE
-		_:
-			node = Control.new()
-	node.name = go.name
-	node.mouse_filter = Control.MOUSE_FILTER_PASS if primary == "" or primary in ["Text", "TextMeshProUGUI", "Image", "RawImage"] else Control.MOUSE_FILTER_STOP
-	if primary in ["Text", "TextMeshProUGUI", "Image", "RawImage"]:
-		node.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	state.add_child(node, new_parent, transform)
-	_configure_rect(node, transform.keys, go)
-	node.visible = go.enabled if "enabled" in go else true
-	_report["ui_nodes"] += 1
-	return node
-
-
-## The helper child that runs Unity's auto layout for `ctl` (udon_runtime/udon_layout_group.gd).
-## A child, not a script on the Control: that slot belongs to an Udon behaviour of the object.
-func _ensure_layout_helper(ctl: Control, state: RefCounted) -> void:
-	if ctl.get_node_or_null("UdonLayout") != null:
-		return
-	if not ResourceLoader.exists("res://addons/udon_runtime/udon_layout_group.gd"):
-		return
-	var helper := Node.new()
-	helper.name = "UdonLayout"
-	helper.set_meta("udon_component_child", true)
-	helper.set_script(load("res://addons/udon_runtime/udon_layout_group.gd"))
-	ctl.add_child(helper)
-	helper.owner = state.owner if state.owner != null else ctl
-
-
-var _white_tex: Texture2D = null
-
-## Shared 4 x 4 white texture (udon_runtime ships it as a .tres: no import step) for graphics that have no sprite.
-func _white_texture() -> Texture2D:
-	if _white_tex == null:
-		if ResourceLoader.exists("res://addons/udon_runtime/ui_white.tres"):
-			_white_tex = load("res://addons/udon_runtime/ui_white.tres")
-		if _white_tex == null:
-			var img := Image.create(4, 4, false, Image.FORMAT_RGBA8)
-			img.fill(Color.WHITE)
-			_white_tex = ImageTexture.create_from_image(img)
-	return _white_tex
-
-
-## Children of a Canvas GameObject are built inside its SubViewport (world space) or CanvasLayer.
-## Is `n` inside a converted canvas (its viewport or layer)?
-func _inside_canvas(n: Node) -> bool:
-	var cur: Node = n
-	while cur != null:
-		if cur.has_meta("udon_canvas"):
-			return true
-		cur = cur.get_parent()
-	return false
-
-
-func children_parent(go: RefCounted, state: RefCounted, node: Node) -> Node:
-	var canvas = go.GetComponent("Canvas")
-	if canvas == null or node == null or node is Control:
-		return null  # nested canvases are ordinary containers inside their parent's viewport
-	var keys: Dictionary = canvas.keys
-	var rt = go.transform
-	var size: Vector2 = Vector2(100, 100)
-	if rt != null and rt.keys.has("m_SizeDelta"):
-		var sd = rt.keys["m_SizeDelta"]
-		if sd is Vector2:
-			size = sd
-	var render_mode: int = _to_int(keys.get("m_RenderMode", 0))
-	var scaler = go.GetComponent("MonoBehaviour")
-	if render_mode == 2:
-		return _apply_canvas_group(node, _world_canvas(node, size, rt, state))
-	# screen space: a CanvasLayer with a root control sized to the reference resolution
-	var ref_size: Vector2 = Vector2(1920, 1080)
-	for component_ref in go.components:
-		var component = go.meta.lookup(component_ref.values()[0])
-		if component != null and component.type == "MonoBehaviour" and component.keys.has("m_ReferenceResolution"):
-			var rr = component.keys["m_ReferenceResolution"]
-			if rr is Vector2:
-				ref_size = rr
-	var layer := CanvasLayer.new()
-	layer.name = "CanvasLayer"
-	node.add_child(layer, true)
-	layer.owner = state.owner
-	var root := Control.new()
-	root.name = "Canvas"
-	root.anchor_right = 1.0
-	root.anchor_bottom = 1.0
-	# an invisible full-window container: it must not swallow the clicks meant for the 3D world
-	# (world canvases, pickups) behind it; its controls still receive theirs
-	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	layer.add_child(root, true)
-	root.owner = state.owner
-	node.set_meta("udon_canvas", {"mode": "overlay", "root": node.get_path_to(root), "size": ref_size})
-	return _apply_canvas_group(node, root)
-
-
-## A CanvasGroup on a canvas GameObject is converted before the canvas root Control exists
-## (unidot's UnidotCanvasGroup leaves its settings on the container); apply them to the root.
-func _apply_canvas_group(container: Node, root: Node) -> Node:
-	if container != null and root is Control and container.has_meta("udon_canvas_group"):
-		var cfg: Dictionary = container.get_meta("udon_canvas_group")
-		root.modulate.a = clampf(float(cfg.get("alpha", 1.0)), 0.0, 1.0)
-		root.mouse_filter = Control.MOUSE_FILTER_STOP if bool(cfg.get("interactable", true)) and bool(cfg.get("blocksRaycasts", true)) else Control.MOUSE_FILTER_IGNORE
-		root.set_meta("udon_canvas_group", cfg)
-		container.remove_meta("udon_canvas_group")
-	return root
-
-
-func _world_canvas(node: Node, size: Vector2, rt, state: RefCounted) -> Node:
-	# Canvas units are metres at scale 1 (the RectTransform scale converts pixel-style layouts);
-	# the viewport renders at `udon/canvas_pixels_per_metre` (default 1024) times the canvas scale.
-	var ppm: float = float(ProjectSettings.get_setting("udon/canvas_pixels_per_metre", 1024.0))
-	var gscale: Vector3 = node.global_transform.basis.get_scale() if node.is_inside_tree() else node.scale
-	var k: float = maxf(ppm * maxf(gscale.x, 1e-6), 0.01)
-	var units: Vector2 = Vector2(maxf(size.x, 1e-4), maxf(size.y, 1e-4))
-	var w: int = clampi(int(ceil(units.x * k)), 1, 8192)
-	var h: int = clampi(int(ceil(units.y * k)), 1, 8192)
-	var vp := SubViewport.new()
-	vp.name = "Viewport"
-	vp.size = Vector2i(w, h)
-	vp.transparent_bg = true
-	vp.disable_3d = true
-	vp.gui_embed_subwindows = true
-	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	node.add_child(vp, true)
-	vp.owner = state.owner
-	var root := Control.new()
-	root.name = "Canvas"
-	root.size = units
-	root.scale = Vector2(k, k)
-	vp.add_child(root, true)
-	root.owner = state.owner
-	# Unity draws the canvas in the local XY plane, readable from its -Z side; the quad faces
-	# -Z (half-turn about Y) which also puts texture U along -X, matching the mirrored X axis.
-	var pivot: Vector2 = Vector2(0.5, 0.5)
-	if rt != null and rt.keys.get("m_Pivot") is Vector2:
-		pivot = rt.keys["m_Pivot"]
-	var plane := MeshInstance3D.new()
-	plane.name = "CanvasPlane"
-	var quad := QuadMesh.new()
-	quad.size = units
-	plane.mesh = quad
-	var center := Vector3(-(0.5 - pivot.x) * units.x, (0.5 - pivot.y) * units.y, 0.0)
-	plane.transform = Transform3D(Basis.from_euler(Vector3(0.0, PI, 0.0)), center)
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	plane.material_override = mat
-	node.add_child(plane, true)
-	plane.owner = state.owner
-	# udon_runtime's canvas plane script binds the viewport texture, refits the viewport to the
-	# UI's real bounds and handles canvases nested inside other canvases at runtime.
-	if ResourceLoader.exists("res://addons/udon_runtime/udon_canvas_plane.gd"):
-		plane.set_script(load("res://addons/udon_runtime/udon_canvas_plane.gd"))
-		plane.set("viewport_path", plane.get_path_to(vp))
-	else:
-		var vt := ViewportTexture.new()
-		vt.viewport_path = state.owner.get_path_to(vp)
-		mat.albedo_texture = vt
-	var area := Area3D.new()
-	area.name = "UiShape"
-	var shape := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	box.size = Vector3(units.x, units.y, 0.01)
-	shape.shape = box
-	area.add_child(shape, true)
-	area.transform = plane.transform
-	node.add_child(area, true)
-	area.owner = state.owner
-	shape.owner = state.owner
-	area.add_to_group("udon_ui_shape", true)
-	if rt != null:
-		_store_rect_meta(node, rt.keys)
-	node.set_meta("udon_canvas", {"mode": "world", "viewport": node.get_path_to(vp), "root": node.get_path_to(root), "plane": node.get_path_to(plane), "size": units, "k": k, "pivot": pivot, "offset": Vector2.ZERO, "plane_center": center})
-	return root
-
-
-func _store_rect_meta(node: Node, keys: Dictionary) -> void:
-	var amin: Vector2 = keys.get("m_AnchorMin") if keys.get("m_AnchorMin") is Vector2 else Vector2(0.5, 0.5)
-	var amax: Vector2 = keys.get("m_AnchorMax") if keys.get("m_AnchorMax") is Vector2 else Vector2(0.5, 0.5)
-	var ap: Vector2 = keys.get("m_AnchoredPosition") if keys.get("m_AnchoredPosition") is Vector2 else Vector2.ZERO
-	var sd: Vector2 = keys.get("m_SizeDelta") if keys.get("m_SizeDelta") is Vector2 else Vector2.ZERO
-	var pv: Vector2 = keys.get("m_Pivot") if keys.get("m_Pivot") is Vector2 else Vector2(0.5, 0.5)
-	var sc: Vector2 = Vector2.ONE
-	if keys.get("m_LocalScale") is Vector3:
-		sc = Vector2(keys["m_LocalScale"].x, keys["m_LocalScale"].y)
-	node.set_meta("udon_rect", {"anchor_min": amin, "anchor_max": amax, "anchored_position": ap, "size_delta": sd, "pivot": pv, "scale": sc})
-
-
-## Unity world canvases do not clip: children may extend far beyond the canvas rect (a 1×1 root
-## with 300×100 menus is common). Once the UI tree exists, size the viewport to the union of the
-## drawing controls and move the plane so the canvas keeps its world placement. Plain Controls
-## (RectTransforms without a Graphic: menus, anchors, layout groups) are layout helpers whose rects
-## can be far larger than their content (a 100×100 container scaled 200×) and do not count; their
-## scale still applies to what they contain. Same rules as udon_canvas_plane.gd at runtime.
-const MAX_VIEWPORT_PX := 8192.0
-
-func _finalize_world_canvas(node: Node) -> void:
-	var cfg: Dictionary = node.get_meta("udon_canvas")
-	var vp: SubViewport = node.get_node_or_null(cfg.get("viewport", NodePath()))
-	var root: Control = node.get_node_or_null(cfg.get("root", NodePath()))
-	var plane: MeshInstance3D = node.get_node_or_null(cfg.get("plane", NodePath()))
-	var area: Area3D = node.get_node_or_null(NodePath("UiShape"))
-	if vp == null or root == null or plane == null:
-		return
-	var k: float = float(cfg.get("k", 1.0))
-	var rsize: Vector2 = cfg.get("size", root.size)
-	var union: Rect2 = Rect2(Vector2.ZERO, rsize)
-	var rects: Array = []
-	for c in root.get_children():
-		_content_bounds(c, rsize, Transform2D.IDENTITY, rects)
-	for r in rects:
-		union = union.merge(r)
-	# beyond the viewport limit the pixel density drops instead of stretching the texture
-	if union.size.x * k > MAX_VIEWPORT_PX:
-		k = MAX_VIEWPORT_PX / union.size.x
-	if union.size.y * k > MAX_VIEWPORT_PX:
-		k = MAX_VIEWPORT_PX / union.size.y
-	k = maxf(k, 1e-4)
-	root.scale = Vector2(k, k)
-	cfg["k"] = k
-	var w: int = clampi(int(ceil(union.size.x * k)), 1, int(MAX_VIEWPORT_PX))
-	var h: int = clampi(int(ceil(union.size.y * k)), 1, int(MAX_VIEWPORT_PX))
-	vp.size = Vector2i(w, h)
-	root.position = -union.position * k
-	var pv: Vector2 = cfg.get("pivot", Vector2(0.5, 0.5))
-	var center: Vector3 = Vector3(pv.x * rsize.x - union.position.x - union.size.x * 0.5, (1.0 - pv.y) * rsize.y - union.position.y - union.size.y * 0.5, 0.0)
-	var quad: QuadMesh = plane.mesh as QuadMesh
-	if quad != null:
-		quad.size = union.size
-	plane.transform = Transform3D(Basis.from_euler(Vector3(0.0, PI, 0.0)), center)
-	if area != null:
-		area.transform = plane.transform
-		var shape: CollisionShape3D = area.get_node_or_null("CollisionShape3D")
-		if shape != null and shape.shape is BoxShape3D:
-			shape.shape.size = Vector3(union.size.x, union.size.y, 0.01)
-	cfg["plane_size"] = union.size
-	cfg["offset"] = union.position
-	cfg["plane_center"] = center
-	node.set_meta("udon_canvas", cfg)
-
-
-## Append the rect, in root units, of every drawing control at or below `c` (hidden ones included:
-## menus toggled at runtime must fit the plane). Rects come from the anchor/offset values stored at
-## import (the controls are not laid out yet); `to_root` maps c's parent space to root space and
-## carries the ancestors' scale and rotation around their pivots, as Control.get_transform() does.
-func _content_bounds(c: Node, parent_size: Vector2, to_root: Transform2D, out: Array) -> void:
-	if not (c is Control):
-		return
-	var ctl: Control = c
-	var left: float = ctl.anchor_left * parent_size.x + ctl.offset_left
-	var right: float = ctl.anchor_right * parent_size.x + ctl.offset_right
-	var top: float = ctl.anchor_top * parent_size.y + ctl.offset_top
-	var bottom: float = ctl.anchor_bottom * parent_size.y + ctl.offset_bottom
-	var size: Vector2 = Vector2(maxf(right - left, 0.0), maxf(bottom - top, 0.0))
-	var pv: Vector2 = ctl.pivot_offset
-	var local: Transform2D = Transform2D(0.0, Vector2(left, top) + pv) * Transform2D(ctl.rotation, ctl.scale, 0.0, Vector2.ZERO) * Transform2D(0.0, -pv)
-	var xf: Transform2D = to_root * local
-	var own: Rect2 = xf * Rect2(Vector2.ZERO, size)
-	if ctl.get_class() != "Control":
-		out.append(own)
-	# a Mask / RectMask2D / ScrollRect clips what it holds: hidden scroll content must not grow the plane
-	var inner: Array = [] if (ctl.clip_contents or ctl is ScrollContainer) else out
-	for ch in ctl.get_children():
-		_content_bounds(ch, size, xf, inner)
-	if inner != out:
-		for r in inner:
-			var clipped: Rect2 = (r as Rect2).intersection(own)
-			if clipped.size.x > 0.0 and clipped.size.y > 0.0:
-				out.append(clipped)
-
-
-## RectTransform → Control anchors/offsets (Unity Y-up, Godot Y-down).
-func _configure_rect(node: Control, keys: Dictionary, go: RefCounted) -> void:
-	var amin: Vector2 = keys.get("m_AnchorMin", Vector2(0.5, 0.5)) if keys.get("m_AnchorMin") is Vector2 else Vector2(0.5, 0.5)
-	var amax: Vector2 = keys.get("m_AnchorMax", Vector2(0.5, 0.5)) if keys.get("m_AnchorMax") is Vector2 else Vector2(0.5, 0.5)
-	var ap: Vector2 = keys.get("m_AnchoredPosition", Vector2.ZERO) if keys.get("m_AnchoredPosition") is Vector2 else Vector2.ZERO
-	var sd: Vector2 = keys.get("m_SizeDelta", Vector2.ZERO) if keys.get("m_SizeDelta") is Vector2 else Vector2.ZERO
-	var pv: Vector2 = keys.get("m_Pivot", Vector2(0.5, 0.5)) if keys.get("m_Pivot") is Vector2 else Vector2(0.5, 0.5)
-	node.anchor_left = amin.x
-	node.anchor_right = amax.x
-	node.anchor_top = 1.0 - amax.y
-	node.anchor_bottom = 1.0 - amin.y
-	node.offset_left = ap.x - pv.x * sd.x
-	node.offset_right = ap.x + (1.0 - pv.x) * sd.x
-	node.offset_top = -ap.y - (1.0 - pv.y) * sd.y
-	node.offset_bottom = -ap.y + pv.y * sd.y
-	var rot = keys.get("m_LocalRotation")
-	if rot is Quaternion:
-		var e: Vector3 = Basis(rot.normalized()).get_euler(EULER_ORDER_YXZ)
-		node.rotation = -e.z
-	var sc = keys.get("m_LocalScale")
-	if sc is Vector3:
-		node.scale = Vector2(sc.x, sc.y)
-	node.pivot_offset = Vector2(pv.x * sd.x, (1.0 - pv.y) * sd.y)
-	node.set_meta("udon_rect", {"pivot": pv, "anchored_position": ap, "size_delta": sd})
-	node.set_meta("udon_pivot", pv)
-
-
-func _configure_ui_component(kind: String, obj: RefCounted, state: RefCounted, node: Node) -> void:
-	state.add_fileID(node, obj)
-	var keys: Dictionary = obj.keys
-	var ctl: Control = node as Control
-	if ctl == null:
-		return
-	match kind:
-		"Image":
-			var tex: Texture2D = _sprite_texture(obj.get_ref(keys, "m_Sprite"), obj)
-			var col: Color = keys.get("m_Color", Color.WHITE) if keys.get("m_Color") is Color else Color.WHITE
-			if ctl is TextureRect:
-				# Unity draws an Image without a sprite as a solid rectangle in its colour, and the
-				# built-in UI sprites (UISprite, Background, Knob ...) are not part of any package:
-				# both get a white texture. The colour tints this graphic only, not its children.
-				ctl.texture = tex if tex != null else _white_texture()
-				ctl.self_modulate = col
-				if ctl.has_meta("udon_mask_hidden"):
-					ctl.self_modulate.a = 0.0  # a Mask that does not show its graphic (any order)
-				if _to_int(keys.get("m_PreserveAspect", 0)) != 0:
-					ctl.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			else:
-				_apply_background(ctl, tex, col, keys)
-		"RawImage":
-			var tex2: Texture2D = _sprite_texture(obj.get_ref(keys, "m_Texture"), obj)
-			var col2: Color = keys.get("m_Color", Color.WHITE) if keys.get("m_Color") is Color else Color.WHITE
-			if ctl is TextureRect:
-				ctl.texture = tex2 if tex2 != null else _white_texture()
-				ctl.self_modulate = col2
-				if ctl.has_meta("udon_mask_hidden"):
-					ctl.self_modulate.a = 0.0
-			else:
-				_apply_background(ctl, tex2, col2, keys)
-		"Text":
-			_configure_text(ctl, keys, obj)
-		"TextMeshProUGUI":
-			_configure_tmp(ctl, keys, obj)
-		"Button":
-			if ctl is BaseButton:
-				ctl.disabled = _to_int(keys.get("m_Interactable", 1)) == 0
-			_queue_events(keys.get("m_OnClick"), ctl, "pressed", 0, state, obj)
-		"Toggle":
-			if ctl is BaseButton:
-				ctl.button_pressed = _to_int(keys.get("m_IsOn", 0)) != 0
-				ctl.disabled = _to_int(keys.get("m_Interactable", 1)) == 0
-			_queue_events(keys.get("onValueChanged"), ctl, "toggled", 1, state, obj)
-		"Scrollbar":
-			if ctl is Range:
-				# Unity's value runs 0..1 whatever the handle size is: no page, the size is kept aside
-				ctl.min_value = 0.0
-				ctl.max_value = 1.0
-				ctl.step = 0.0
-				ctl.page = 0.0
-				ctl.value = _to_float(keys.get("m_Value", 0.0))
-				ctl.set_meta("udon_scrollbar", {"direction": _to_int(keys.get("m_Direction", 0)), "size": _to_float(keys.get("m_Size", 1.0))})
-			_queue_events(keys.get("m_OnValueChanged"), ctl, "value_changed", 1, state, obj)
-		"Slider":
-			if ctl is Range:
-				ctl.min_value = _to_float(keys.get("m_MinValue", 0.0))
-				ctl.max_value = _to_float(keys.get("m_MaxValue", 1.0))
-				ctl.rounded = _to_int(keys.get("m_WholeNumbers", 0)) != 0
-				ctl.step = 1.0 if ctl.rounded else 0.0
-				ctl.value = _to_float(keys.get("m_Value", 0.0))
-			_queue_events(keys.get("m_OnValueChanged"), ctl, "value_changed", 1, state, obj)
-		"InputField", "TMP_InputField", "VRCUrlInputField":
-			if ctl is LineEdit:
-				ctl.text = str(keys.get("m_Text", "")) if keys.get("m_Text") != null else ""
-				ctl.max_length = _to_int(keys.get("m_CharacterLimit", 0))
-				ctl.editable = _to_int(keys.get("m_Interactable", 1)) != 0
-			_queue_events(keys.get("m_OnEndEdit"), ctl, "text_submitted", 1, state, obj)
-			_queue_events(keys.get("m_OnValueChanged"), ctl, "text_changed", 1, state, obj)
-			_queue_events(keys.get("m_OnSubmit"), ctl, "text_submitted", 1, state, obj)
-		"Dropdown", "TMP_Dropdown":
-			if ctl is OptionButton:
-				var opts = keys.get("m_Options", {})
-				if opts is Dictionary:
-					for o in opts.get("m_Options", []):
-						ctl.add_item(str(o.get("m_Text", "")) if o is Dictionary else str(o))
-				ctl.selected = _to_int(keys.get("m_Value", 0))
-				# Unity draws the caption with its own Text child (built later): udon_runtime's
-				# dropdown script hides the button's own text and keeps that label up to date
-				ctl.set_meta("udon_dropdown", {})
-				if keys.has("m_CaptionText"):
-					var cap: NodePath = _nodepath_for_ref(keys["m_CaptionText"], obj, ctl, "udon_dropdown", "caption")
-					if cap != NodePath():
-						ctl.set_meta("udon_dropdown", {"caption": cap})
-				if ResourceLoader.exists("res://addons/udon_runtime/udon_dropdown.gd"):
-					ctl.set_script(load("res://addons/udon_runtime/udon_dropdown.gd"))
-			_queue_events(keys.get("m_OnValueChanged"), ctl, "item_selected", 1, state, obj)
-		"ScrollRect":
-			if ctl is ScrollContainer:
-				# Unity draws its own Scrollbar objects: Godot's bars stay hidden but keep scrolling
-				ctl.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER if _to_int(keys.get("m_Horizontal", 1)) != 0 else ScrollContainer.SCROLL_MODE_DISABLED
-				ctl.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER if _to_int(keys.get("m_Vertical", 1)) != 0 else ScrollContainer.SCROLL_MODE_DISABLED
-				ctl.set_meta("udon_scroll", {})
-				# content and the Unity Scrollbar objects are built later: unresolved ones are
-				# patched into the metadata when the scene is complete
-				for pair in [["m_Content", "content"], ["m_VerticalScrollbar", "vbar"], ["m_HorizontalScrollbar", "hbar"]]:
-					if keys.has(pair[0]):
-						var cp: NodePath = _nodepath_for_ref(keys[pair[0]], obj, ctl, "udon_scroll", pair[1])
-						if cp != NodePath():
-							var sc: Dictionary = ctl.get_meta("udon_scroll")
-							sc[pair[1]] = cp
-							ctl.set_meta("udon_scroll", sc)
-				# udon_runtime's scroll rect script sizes the scrolled child from the content and
-				# raises `scrolled` (ScrollRect.onValueChanged)
-				if ResourceLoader.exists("res://addons/udon_runtime/udon_scroll_rect.gd"):
-					ctl.set_script(load("res://addons/udon_runtime/udon_scroll_rect.gd"))
-					_queue_events(keys.get("m_OnValueChanged"), ctl, "scrolled", 1, state, obj)
-		"Mask", "RectMask2D":
-			ctl.clip_contents = true
-			if kind == "Mask" and _to_int(keys.get("m_ShowMaskGraphic", 1)) == 0 and ctl is TextureRect:
-				# the Image of the same object may be configured before or after this component
-				ctl.set_meta("udon_mask_hidden", true)
-				ctl.self_modulate.a = 0.0
-		"HorizontalLayoutGroup", "VerticalLayoutGroup", "GridLayoutGroup":
-			# Unity's auto layout runs in udon_runtime (udon_layout_group.gd on a helper child)
-			var pd = keys.get("m_Padding", {})
-			var lay: Dictionary = {
-				"type": "grid" if kind == "GridLayoutGroup" else ("horizontal" if kind == "HorizontalLayoutGroup" else "vertical"),
-				"padding": [_to_int(pd.get("m_Left", 0)), _to_int(pd.get("m_Right", 0)), _to_int(pd.get("m_Top", 0)), _to_int(pd.get("m_Bottom", 0))] if pd is Dictionary else [0, 0, 0, 0],
-				"align": _to_int(keys.get("m_ChildAlignment", 0)),
-			}
-			if kind == "GridLayoutGroup":
-				lay["cell"] = keys.get("m_CellSize", Vector2(100, 100)) if keys.get("m_CellSize") is Vector2 else Vector2(100, 100)
-				lay["spacing2"] = keys.get("m_Spacing", Vector2.ZERO) if keys.get("m_Spacing") is Vector2 else Vector2.ZERO
-				lay["corner"] = _to_int(keys.get("m_StartCorner", 0))
-				lay["axis"] = _to_int(keys.get("m_StartAxis", 0))
-				lay["constraint"] = _to_int(keys.get("m_Constraint", 0))
-				lay["count"] = _to_int(keys.get("m_ConstraintCount", 2))
-			else:
-				lay["spacing"] = _to_float(keys.get("m_Spacing", 0.0))
-				# before Unity 2017.1 the groups always controlled their children's size
-				lay["control_w"] = _to_int(keys.get("m_ChildControlWidth", 1)) != 0
-				lay["control_h"] = _to_int(keys.get("m_ChildControlHeight", 1)) != 0
-				lay["expand_w"] = _to_int(keys.get("m_ChildForceExpandWidth", 1)) != 0
-				lay["expand_h"] = _to_int(keys.get("m_ChildForceExpandHeight", 1)) != 0
-				lay["reverse"] = _to_int(keys.get("m_ReverseArrangement", 0)) != 0
-			if _to_int(keys.get("m_Enabled", 1)) != 0:
-				ctl.set_meta("udon_layout", lay)
-				_ensure_layout_helper(ctl, state)
-		"ContentSizeFitter":
-			if _to_int(keys.get("m_Enabled", 1)) != 0:
-				ctl.set_meta("udon_fitter", {"h": _to_int(keys.get("m_HorizontalFit", 0)), "v": _to_int(keys.get("m_VerticalFit", 0))})
-				_ensure_layout_helper(ctl, state)
-		"LayoutElement":
-			ctl.set_meta("udon_layout_element", {
-				"min": Vector2(_to_float(keys.get("m_MinWidth", -1.0)), _to_float(keys.get("m_MinHeight", -1.0))),
-				"pref": Vector2(_to_float(keys.get("m_PreferredWidth", -1.0)), _to_float(keys.get("m_PreferredHeight", -1.0))),
-				"flex": Vector2(_to_float(keys.get("m_FlexibleWidth", -1.0)), _to_float(keys.get("m_FlexibleHeight", -1.0))),
-				"ignore": _to_int(keys.get("m_IgnoreLayout", 0)) != 0,
-			})
-			if _to_int(keys.get("m_IgnoreLayout", 0)) == 0:
-				var mn := Vector2(maxf(float(keys.get("m_MinWidth", -1.0)), float(keys.get("m_PreferredWidth", -1.0))), maxf(float(keys.get("m_MinHeight", -1.0)), float(keys.get("m_PreferredHeight", -1.0))))
-				ctl.custom_minimum_size = Vector2(maxf(mn.x, 0.0), maxf(mn.y, 0.0))
-				if float(keys.get("m_FlexibleWidth", -1.0)) > 0.0:
-					ctl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-				if float(keys.get("m_FlexibleHeight", -1.0)) > 0.0:
-					ctl.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		"Outline", "Shadow":
-			# Unity text effects → theme overrides on the text control (also read by U.ui_effect_*)
-			var ecol: Color = keys.get("m_EffectColor", Color(0, 0, 0, 0.5)) if keys.get("m_EffectColor") is Color else Color(0, 0, 0, 0.5)
-			var edist: Vector2 = keys.get("m_EffectDistance", Vector2(1, -1)) if keys.get("m_EffectDistance") is Vector2 else Vector2(1, -1)
-			var effect: String = "outline" if kind == "Outline" else "shadow"
-			ctl.set_meta("udon_effect_" + effect, {"effectColor": ecol, "effectDistance": edist, "useGraphicAlpha": _to_int(keys.get("m_UseGraphicAlpha", 1)) != 0, "enabled": _to_int(keys.get("m_Enabled", 1)) != 0})
-			if _to_int(keys.get("m_Enabled", 1)) != 0:
-				if kind == "Outline":
-					ctl.add_theme_color_override("font_outline_color", ecol)
-					ctl.add_theme_constant_override("outline_size", int(round(maxf(absf(edist.x), absf(edist.y)))))
-				else:
-					ctl.add_theme_color_override("font_shadow_color", ecol)
-					ctl.add_theme_constant_override("shadow_offset_x", int(round(edist.x)))
-					ctl.add_theme_constant_override("shadow_offset_y", int(round(-edist.y)))
-		"AspectRatioFitter":
-			var mode: int = _to_int(keys.get("m_AspectMode", 0))
-			var ratio: float = maxf(float(keys.get("m_AspectRatio", 1.0)), 0.001)
-			var props: Dictionary = ctl.get_meta("udon_props") if ctl.has_meta("udon_props") else {}
-			props["aspectMode"] = mode
-			props["aspectRatio"] = ratio
-			ctl.set_meta("udon_props", props)
-			if mode == 1:
-				ctl.size = Vector2(ctl.size.x, ctl.size.x / ratio)
-			elif mode == 2:
-				ctl.size = Vector2(ctl.size.y * ratio, ctl.size.y)
-		"CanvasScaler", "GraphicRaycaster", "EventSystem", "StandaloneInputModule", "VRC_UiShape":
-			pass
-		_:
-			pass
-
-
-func _apply_background(ctl: Control, tex: Texture2D, col: Color, keys: Dictionary) -> void:
-	var sb: StyleBox
-	if tex != null:
-		var sbt := StyleBoxTexture.new()
-		sbt.texture = tex
-		sbt.modulate_color = col
-		sb = sbt
-	else:
-		var sbf := StyleBoxFlat.new()
-		sbf.bg_color = col
-		sb = sbf
-	for st in ["normal", "hover", "pressed", "disabled", "focus", "panel"]:
-		if ctl.has_theme_stylebox(st):
-			ctl.add_theme_stylebox_override(st, sb)
-	if ctl is BaseButton:
-		ctl.flat = false
-
-
-func _sprite_texture(ref: Array, obj: RefCounted) -> Texture2D:
-	if ref.size() < 4 or ref[1] == 0:
-		return null
-	if obj.meta.lookup_meta(ref) == null and not database.guid_to_path.has(str(ref[2])):
-		return null
-	var res = obj.meta.get_godot_resource(ref, true)
-	if res is Texture2D:
-		return res
-	if res == null and ref[2] != null:
-		var path: String = str(database.guid_to_path.get(str(ref[2]), ""))
-		if path != "" and ResourceLoader.exists("res://" + path):
-			var loaded = load("res://" + path)
-			if loaded is Texture2D:
-				return loaded
-	return null
-
-
-func _configure_text(ctl: Control, keys: Dictionary, obj: RefCounted) -> void:
-	var text: String = str(keys.get("m_Text", "")) if keys.get("m_Text") != null else ""
-	var fd = keys.get("m_FontData", {})
-	var size: int = 14
-	var align: int = 0
-	if fd is Dictionary:
-		size = _to_int(fd.get("m_FontSize", 14))
-		align = _to_int(fd.get("m_Alignment", 0))
-	var col: Color = keys.get("m_Color", Color.WHITE) if keys.get("m_Color") is Color else Color.WHITE
-	if ctl is Label:
-		ctl.text = text
-		ctl.add_theme_font_size_override("font_size", maxi(size, 1))
-		ctl.add_theme_color_override("font_color", col)
-		ctl.horizontal_alignment = [HORIZONTAL_ALIGNMENT_LEFT, HORIZONTAL_ALIGNMENT_CENTER, HORIZONTAL_ALIGNMENT_RIGHT][align % 3]
-		ctl.vertical_alignment = [VERTICAL_ALIGNMENT_TOP, VERTICAL_ALIGNMENT_CENTER, VERTICAL_ALIGNMENT_BOTTOM][mini(int(align / 3), 2)]
-		ctl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		ctl.clip_text = true
-		if fd is Dictionary:
-			var fref: Array = obj.get_ref(fd, "m_Font")
-			if fref[1] != 0 and obj.meta.lookup_meta(fref) != null:
-				var font = obj.meta.get_godot_resource(fref, true)
-				if font is Font:
-					ctl.add_theme_font_override("font", font)
-	elif ctl is Button:
-		ctl.text = text
-
-
-func _configure_tmp(ctl: Control, keys: Dictionary, _obj: RefCounted) -> void:
-	var text: String = str(keys.get("m_text", "")) if keys.get("m_text") != null else ""
-	var size: float = _to_float(keys.get("m_fontSize", 14.0))
-	var col: Color = keys.get("m_fontColor", Color.WHITE) if keys.get("m_fontColor") is Color else Color.WHITE
-	var align: int = _to_int(keys.get("m_HorizontalAlignment", 1))
-	var valign: int = _to_int(keys.get("m_VerticalAlignment", 256))
-	if ctl is RichTextLabel:
-		ctl.bbcode_enabled = true
-		ctl.text = _tmp_to_bbcode(text)
-		ctl.add_theme_font_size_override("normal_font_size", maxi(int(size), 1))
-		ctl.add_theme_font_size_override("bold_font_size", maxi(int(size), 1))
-		ctl.add_theme_color_override("default_color", col)
-		ctl.scroll_active = false
-		var h: int = HORIZONTAL_ALIGNMENT_LEFT
-		match align:
-			2:
-				h = HORIZONTAL_ALIGNMENT_CENTER
-			4:
-				h = HORIZONTAL_ALIGNMENT_RIGHT
-			8:
-				h = HORIZONTAL_ALIGNMENT_FILL
-		ctl.horizontal_alignment = h
-		match valign:
-			512:
-				ctl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-			1024:
-				ctl.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
-			_:
-				ctl.vertical_alignment = VERTICAL_ALIGNMENT_TOP
-		ctl.set_meta("udon_tmp", true)
-	elif ctl is Label:
-		ctl.text = text
-	elif ctl is Button:
-		ctl.text = text
-
-
-## Minimal TextMeshPro rich text → BBCode (colour, bold, italic, size, line breaks).
-static func _tmp_to_bbcode(s: String) -> String:
-	var out: String = s
-	out = out.replace("<b>", "[b]").replace("</b>", "[/b]").replace("<i>", "[i]").replace("</i>", "[/i]")
-	out = out.replace("</color>", "[/color]").replace("</size>", "[/font_size]")
-	var re := RegEx.new()
-	re.compile("<color=(#?[0-9A-Fa-f]{6,8}|[a-zA-Z]+)>")
-	out = re.sub(out, "[color=$1]", true)
-	re.compile("<size=([0-9.]+)>")
-	out = re.sub(out, "[font_size=$1]", true)
-	re.compile("<[^>]*>")
-	out = re.sub(out, "", true)
-	return out
-
 
 ## UnityEvent persistent calls: `SendCustomEvent("Name")` on an UdonBehaviour becomes a signal
 ## connection to the behaviour's node once the scene is complete.
-func _queue_events(evt, source: Control, signal_name: String, unbinds: int, state: RefCounted, obj: RefCounted) -> void:
+## Hook called by ui_integration.gd for every UnityEvent field of a UI component.
+func ui_unity_event(evt, source: Control, signal_name: String, unbinds: int, state: RefCounted, obj: RefCounted) -> void:
 	if not (evt is Dictionary):
 		return
 	var calls = evt.get("m_PersistentCalls", {}).get("m_Calls", []) if evt.get("m_PersistentCalls") is Dictionary else []
@@ -1944,5 +1258,10 @@ func _save_report() -> void:
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	if f == null:
 		return
+	var ui = _ui_plugin()
+	if ui != null:
+		_report["ui_nodes"] = int(ui.stats.get("ui_nodes", 0))
+		_report["canvases"] = int(ui.stats.get("canvases", 0))
+		_report["ui_unresolved"] = ui.stats.get("unresolved", [])
 	f.store_string(JSON.stringify(_report, "  "))
 	f.close()
