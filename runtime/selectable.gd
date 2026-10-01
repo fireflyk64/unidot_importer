@@ -7,7 +7,11 @@ extends Node
 ##   * colour tint transition: the target graphic takes the colour of the selection state
 ##     (normal, highlighted, pressed, selected, disabled);
 ##   * Toggle: the check mark graphic is shown while the toggle is on;
-##   * Slider: the fill and handle rects follow the value (their anchors, as Unity sets them).
+##   * Slider: the fill and handle rects follow the value (their anchors, as Unity sets them);
+##   * Scrollbar: the handle spans `size` of the bar and moves with the value
+##     (Scrollbar.UpdateVisuals; size and direction in the `unidot_scrollbar` metadata), and
+##     the pointer sets the value as Unity's Scrollbar does (the Godot ScrollBar underneath
+##     draws nothing and its own handling is bypassed).
 ## The parent's `unidot_selectable` metadata holds the settings:
 ##   {transition (0 none, 1 colour tint),
 ##    colors: a ColorBlock {normalColor, highlightedColor, pressedColor, selectedColor,
@@ -58,6 +62,8 @@ func _ready() -> void:
 	if _host is Range:
 		_host.value_changed.connect(func(_v: float) -> void: refresh())
 		_host.changed.connect(refresh)
+	if _host is ScrollBar:
+		_host.gui_input.connect(_scrollbar_input)
 	if _host is Slider:
 		_host.drag_started.connect(func() -> void:
 			_down = true
@@ -155,7 +161,9 @@ static func apply(host: Control, sel_state: String) -> void:
 		var mark: Node = part(host, "graphic")
 		if mark != null:
 			Graphic.set_renderer_alpha(mark, 1.0 if host.button_pressed else 0.0)
-	if host is Range:
+	if host is ScrollBar:
+		scrollbar_visuals(host)
+	elif host is Range:
 		_slider_visuals(host, cfg)
 
 
@@ -183,6 +191,76 @@ static func _slider_visuals(host: Range, cfg: Dictionary) -> void:
 		hmin[axis] = (1.0 - t) if reverse else t
 		hmax[axis] = hmin[axis]
 		_set_anchors(handle, hmin, hmax)
+
+
+## Scrollbar.UpdateVisuals: the handle covers `size` of its container, moved by the value.
+static func scrollbar_visuals(host: Range) -> void:
+	var handle: Control = part(host, "handle") as Control
+	if handle == null or not (RT.logical_parent(handle) is Control):
+		return
+	var sb: Dictionary = host.get_meta(&"unidot_scrollbar") if host.has_meta(&"unidot_scrollbar") else {}
+	var size: float = clampf(float(sb.get("size", 0.2)), 0.0, 1.0)
+	var direction: int = int(sb.get("direction", int(config(host).get("direction", 0))))
+	var axis: int = 0 if direction < 2 else 1
+	var movement: float = clampf(host.value, 0.0, 1.0) * (1.0 - size)
+	var amin := Vector2.ZERO
+	var amax := Vector2.ONE
+	if direction == 1 or direction == 3:
+		amin[axis] = 1.0 - movement - size
+		amax[axis] = 1.0 - movement
+	else:
+		amin[axis] = movement
+		amax[axis] = movement + size
+	_set_anchors(handle, amin, amax)
+
+
+var _grab: Vector2 = Vector2.ZERO
+var _sliding: bool = false
+
+## Scrollbar.OnPointerDown / UpdateDrag: a press on the handle drags it, a press beside it moves
+## the value one handle length towards the pointer; the Godot ScrollBar does not see the event.
+func _scrollbar_input(event: InputEvent) -> void:
+	var handle: Control = part(_host, "handle") as Control
+	var container: Control = handle.get_parent() as Control if handle != null else null
+	if container == null or not interactable(_host) or not _host.is_inside_tree():
+		return
+	var bar: Range = _host
+	var sb: Dictionary = bar.get_meta(&"unidot_scrollbar") if bar.has_meta(&"unidot_scrollbar") else {}
+	var size: float = clampf(float(sb.get("size", 0.2)), 0.0, 1.0)
+	var direction: int = int(sb.get("direction", int(config(bar).get("direction", 0))))
+	var axis: int = 0 if direction < 2 else 1
+	# the pointer in the container (the event is in the bar's coordinates)
+	var to_container: Transform2D = container.get_global_transform().affine_inverse() * bar.get_global_transform()
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		bar.accept_event()
+		_sliding = false
+		if not event.pressed:
+			return
+		var p: Vector2 = to_container * (event as InputEventMouseButton).position
+		var hrect := Rect2(handle.position, handle.size * handle.scale)
+		if hrect.has_point(p):
+			_sliding = true
+			_grab = p - hrect.get_center()
+		else:
+			# towards the pointer: before the handle along the axis lowers the handle's position
+			var before: bool = p[axis] < hrect.position[axis]
+			var forward: bool = before == (direction == 1 or direction == 2)   # does that raise the value?
+			bar.value = clampf(bar.value + (size if forward else -size), 0.0, 1.0)
+	elif event is InputEventMouseMotion and _sliding:
+		bar.accept_event()
+		if ((event as InputEventMouseMotion).button_mask & MOUSE_BUTTON_MASK_LEFT) == 0:
+			_sliding = false
+			return
+		var p2: Vector2 = to_container * (event as InputEventMouseMotion).position - _grab
+		var length: float = container.size[axis]
+		var remaining: float = length * (1.0 - size)
+		if remaining <= 0.0:
+			return
+		# the handle's leading corner along the axis, from the container's left / bottom
+		var along: float = p2.x if axis == 0 else length - p2.y
+		var corner: float = along - length * size * 0.5
+		var t: float = clampf(corner / remaining, 0.0, 1.0)
+		bar.value = (1.0 - t) if (direction == 1 or direction == 3) else t
 
 
 static func _set_anchors(c: Control, amin: Vector2, amax: Vector2) -> void:

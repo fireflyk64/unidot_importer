@@ -67,7 +67,7 @@ const UI_COMPONENTS := {
 }
 
 ## Unity UI components that decide the Control class of a RectTransform GameObject (first wins).
-const UI_PRIMARY_ORDER := ["Button", "Toggle", "Slider", "Scrollbar", "InputField", "TMP_InputField", "Dropdown", "TMP_Dropdown", "ScrollRect", "Text", "TextMeshProUGUI", "Image", "RawImage"]
+const UI_PRIMARY_ORDER := ["Button", "Toggle", "Slider", "Scrollbar", "InputField", "TMP_InputField", "Dropdown", "TMP_Dropdown", "Text", "TextMeshProUGUI", "Image", "RawImage"]
 
 var database = null
 ## Counters for import reports.
@@ -425,8 +425,6 @@ func _new_control(primary: String, keys: Dictionary) -> Control:
 			node = LineEdit.new()
 		"Dropdown", "TMP_Dropdown":
 			node = OptionButton.new()
-		"ScrollRect":
-			node = ScrollContainer.new()
 		"Text", "TextMeshProUGUI":
 			# a RichTextLabel for uGUI's Text too: rich text, and lines that do not fit are not drawn
 			node = RichTextLabel.new()
@@ -563,7 +561,7 @@ func _white_texture() -> Texture2D:
 
 
 ## UnityEvent persistent calls are for a scripting plugin to wire.
-func _events(evt, source: Control, signal_name: String, unbinds: int, state: RefCounted, obj: RefCounted) -> void:
+func _events(evt, source: Node, signal_name: String, unbinds: int, state: RefCounted, obj: RefCounted) -> void:
 	if not (evt is Dictionary):
 		return
 	for plugin in obj.meta.get_enabled_plugins():
@@ -648,7 +646,7 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 				ctl.page = 0.0
 				ctl.value = _to_float(keys.get("m_Value", 0.0))
 				ctl.set_meta("unidot_scrollbar", {"direction": _to_int(keys.get("m_Direction", 0)), "size": _to_float(keys.get("m_Size", 1.0))})
-			_selectable(ctl, keys, obj, state)
+			_selectable(ctl, keys, obj, state, {"m_HandleRect": "handle"})
 			_events(keys.get("m_OnValueChanged"), ctl, "value_changed", 1, state, obj)
 		"Slider":
 			if ctl is Range:
@@ -697,24 +695,34 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 			_selectable(ctl, keys, obj, state)
 			_events(keys.get("m_OnValueChanged"), ctl, "item_selected", 1, state, obj)
 		"ScrollRect":
-			if ctl is ScrollContainer:
-				# Unity draws its own Scrollbar objects: Godot's bars stay hidden but keep scrolling
-				ctl.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER if _to_int(keys.get("m_Horizontal", 1)) != 0 else ScrollContainer.SCROLL_MODE_DISABLED
-				ctl.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER if _to_int(keys.get("m_Vertical", 1)) != 0 else ScrollContainer.SCROLL_MODE_DISABLED
-				ctl.set_meta("unidot_scroll", {})
-				# content and the Unity Scrollbar objects are built later: unresolved ones are
-				# patched into the metadata when the scene is complete
-				for pair in [["m_Content", "content"], ["m_VerticalScrollbar", "vbar"], ["m_HorizontalScrollbar", "hbar"]]:
-					if keys.has(pair[0]):
-						var cp: NodePath = _ref_path(keys[pair[0]], obj, ctl, "unidot_scroll", pair[1])
-						if cp != NodePath():
-							var sc: Dictionary = ctl.get_meta("unidot_scroll")
-							sc[pair[1]] = cp
-							ctl.set_meta("unidot_scroll", sc)
-				# runtime/scroll_rect.gd sizes the scrolled child from the content and
-				# raises `scrolled` (ScrollRect.onValueChanged)
-				ctl.set_script(scroll_rect_script)
-				_events(keys.get("m_OnValueChanged"), ctl, "scrolled", 1, state, obj)
+			# Unity's own scroller, on the objects as they are: runtime/scroll_rect.gd (a helper
+			# child) moves the content inside the viewport object and drives the Scrollbars
+			ctl.set_meta(scroll_rect_script.META, {
+				"horizontal": _to_int(keys.get("m_Horizontal", 1)) != 0,
+				"vertical": _to_int(keys.get("m_Vertical", 1)) != 0,
+				"movement": _to_int(keys.get("m_MovementType", 1)),
+				"sensitivity": _to_float(keys.get("m_ScrollSensitivity", 1.0)),
+				"visibility": [_to_int(keys.get("m_HorizontalScrollbarVisibility", 0)), _to_int(keys.get("m_VerticalScrollbarVisibility", 0))],
+				"spacing": [_to_float(keys.get("m_HorizontalScrollbarSpacing", 0.0)), _to_float(keys.get("m_VerticalScrollbarSpacing", 0.0))],
+			})
+			# content, viewport and the Scrollbar objects are built later: unresolved ones are
+			# patched into the metadata when the scene is complete
+			for pair in [["m_Content", "content"], ["m_Viewport", "viewport"], ["m_VerticalScrollbar", "vbar"], ["m_HorizontalScrollbar", "hbar"]]:
+				if keys.has(pair[0]):
+					var cp: NodePath = _ref_path(keys[pair[0]], obj, ctl, String(scroll_rect_script.META), pair[1])
+					if cp != NodePath():
+						var sc: Dictionary = ctl.get_meta(scroll_rect_script.META)
+						sc[pair[1]] = cp
+						ctl.set_meta(scroll_rect_script.META, sc)
+			if ctl.mouse_filter == Control.MOUSE_FILTER_IGNORE:
+				ctl.mouse_filter = Control.MOUSE_FILTER_PASS   # the wheel and drags reach it
+			if _to_int(keys.get("m_Enabled", 1)) == 0:
+				var off: Dictionary = ctl.get_meta(scroll_rect_script.META)
+				off["enabled"] = false
+				ctl.set_meta(scroll_rect_script.META, off)
+			# the helper raises ScrollRect.onValueChanged
+			_ensure_helper(ctl, state, scroll_rect_script.HELPER, scroll_rect_script)
+			_events(keys.get("m_OnValueChanged"), ctl.get_node(scroll_rect_script.HELPER), "scrolled", 1, state, obj)
 		"Mask", "RectMask2D":
 			ctl.clip_contents = true
 			if kind == "Mask" and _to_int(keys.get("m_ShowMaskGraphic", 1)) == 0 and _to_int(keys.get("m_Enabled", 1)) != 0:
@@ -911,7 +919,7 @@ func _sprite_drawing(keys: Dictionary, info: Dictionary, ctl: Control) -> Dictio
 			if has_border:
 				return {"type": 1, "border": border, "unit": unit, "center": _to_int(keys.get("m_FillCenter", 1)) != 0}
 		2:
-			return {"type": 2, "unit": unit}
+			return {"type": 2, "border": border, "unit": unit, "center": _to_int(keys.get("m_FillCenter", 1)) != 0}
 		3:
 			return {"type": 3, "method": _to_int(keys.get("m_FillMethod", 4)), "origin": _to_int(keys.get("m_FillOrigin", 0)), "amount": _to_float(keys.get("m_FillAmount", 1.0)), "clockwise": _to_int(keys.get("m_FillClockwise", 1)) != 0}
 	return {}
@@ -1114,6 +1122,7 @@ const _OVERRIDE_FIELDS := {
 	"Toggle": ["m_IsOn", "graphic", "toggleTransition", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
 	"Slider": ["m_Value", "m_MinValue", "m_MaxValue", "m_WholeNumbers", "m_Direction", "m_FillRect", "m_HandleRect", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
 	"Scrollbar": ["m_Value", "m_Size", "m_Direction", "m_HandleRect", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"ScrollRect": ["m_Content", "m_Viewport", "m_Horizontal", "m_Vertical", "m_MovementType", "m_ScrollSensitivity", "m_HorizontalScrollbar", "m_VerticalScrollbar", "m_HorizontalScrollbarVisibility", "m_VerticalScrollbarVisibility", "m_HorizontalScrollbarSpacing", "m_VerticalScrollbarSpacing"],
 	"InputField": ["m_Text", "m_CharacterLimit", "m_TextComponent", "m_Placeholder", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
 	"TMP_InputField": ["m_Text", "m_CharacterLimit", "m_TextComponent", "m_Placeholder", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
 	"Dropdown": ["m_Value", "m_Options", "m_CaptionText", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
@@ -1216,6 +1225,26 @@ func _override_component(kind: String, ctl: Control, uprops: Dictionary, obj: Re
 				Graphic.update(ctl, graphic)
 		"Button", "Toggle", "Slider", "Scrollbar", "InputField", "TMP_InputField", "Dropdown", "TMP_Dropdown":
 			_override_selectable(kind, ctl, uprops)
+		"ScrollRect":
+			var scroll: Dictionary = (ctl.get_meta(scroll_rect_script.META) as Dictionary).duplicate(true) if ctl.has_meta(scroll_rect_script.META) else {}
+			for entry in [["m_Horizontal", "horizontal"], ["m_Vertical", "vertical"]]:
+				if uprops.has(entry[0]):
+					scroll[entry[1]] = _to_int(uprops[entry[0]]) != 0
+			if uprops.has("m_MovementType"):
+				scroll["movement"] = _to_int(uprops["m_MovementType"])
+			if uprops.has("m_ScrollSensitivity"):
+				scroll["sensitivity"] = _to_float(uprops["m_ScrollSensitivity"])
+			var vis: Array = (scroll.get("visibility", [0, 0]) as Array).duplicate()
+			var gap: Array = (scroll.get("spacing", [0.0, 0.0]) as Array).duplicate()
+			for entry in [["m_HorizontalScrollbarVisibility", 0], ["m_VerticalScrollbarVisibility", 1]]:
+				if uprops.has(entry[0]):
+					vis[entry[1]] = _to_int(uprops[entry[0]])
+			for entry in [["m_HorizontalScrollbarSpacing", 0], ["m_VerticalScrollbarSpacing", 1]]:
+				if uprops.has(entry[0]):
+					gap[entry[1]] = _to_float(uprops[entry[0]])
+			scroll["visibility"] = vis
+			scroll["spacing"] = gap
+			ctl.set_meta(scroll_rect_script.META, scroll)
 		"Mask":
 			if uprops.has("m_ShowMaskGraphic") or uprops.has("m_Enabled"):
 				var mask_on: bool = _to_int(uprops.get("m_Enabled", 1)) != 0
@@ -1406,6 +1435,13 @@ func _override_selectable(kind: String, ctl: Control, uprops: Dictionary) -> voi
 				ctl.button_pressed = _to_int(uprops["m_IsOn"]) != 0
 		"Slider", "Scrollbar":
 			if ctl is Range:
+				if kind == "Scrollbar" and (uprops.has("m_Size") or uprops.has("m_Direction")):
+					var sbar: Dictionary = (ctl.get_meta("unidot_scrollbar") as Dictionary).duplicate() if ctl.has_meta("unidot_scrollbar") else {}
+					if uprops.has("m_Size"):
+						sbar["size"] = _to_float(uprops["m_Size"])
+					if uprops.has("m_Direction"):
+						sbar["direction"] = _to_int(uprops["m_Direction"])
+					ctl.set_meta("unidot_scrollbar", sbar)
 				if kind == "Slider":
 					if uprops.has("m_MinValue"):
 						ctl.min_value = _to_float(uprops["m_MinValue"])

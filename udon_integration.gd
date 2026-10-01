@@ -1141,7 +1141,7 @@ func _note_unknown(guid: String, obj: RefCounted, node: Node) -> void:
 ## UnityEvent persistent calls: `SendCustomEvent("Name")` on an UdonBehaviour becomes a signal
 ## connection to the behaviour's node once the scene is complete.
 ## Hook called by ui_integration.gd for every UnityEvent field of a UI component.
-func ui_unity_event(evt, source: Control, signal_name: String, unbinds: int, state: RefCounted, obj: RefCounted) -> void:
+func ui_unity_event(evt, source: Node, signal_name: String, unbinds: int, state: RefCounted, obj: RefCounted) -> void:
 	if not (evt is Dictionary):
 		return
 	var calls = evt.get("m_PersistentCalls", {}).get("m_Calls", []) if evt.get("m_PersistentCalls") is Dictionary else []

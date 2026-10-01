@@ -243,11 +243,8 @@ func _sprite_pixel(c: Control, tex: Texture2D, sprite: Dictionary, local: Vector
 				return null
 			return region.position + (rects[1] as Rect2).position + (local - dest.position) / dest.size * (rects[1] as Rect2).size
 		Sprite.TILED:
-			var unit: float = float(sprite.get("unit", 1.0))
-			var tile: Vector2 = region.size * unit
-			if tile.x <= 0.0 or tile.y <= 0.0:
-				return null
-			return region.position + Vector2(fmod(local.x, tile.x) / unit, region.size.y - fmod(c.size.y - local.y, tile.y) / unit)
+			var tt = Sprite.tiled_texel(local, c.size, region.size, sprite.get("border", [0, 0, 0, 0]), float(sprite.get("unit", 1.0)), bool(sprite.get("center", true)))
+			return null if tt == null else region.position + (tt as Vector2)
 	return region.position + local / c.size * region.size
 
 

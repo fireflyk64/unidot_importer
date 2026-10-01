@@ -13,6 +13,7 @@ const Graphic := preload("../runtime/ui_graphic.gd")
 const Selectable := preload("../runtime/selectable.gd")
 const TextFit := preload("../runtime/ui_text_fit.gd")
 const Sprite := preload("../runtime/ui_sprite.gd")
+const Scroll := preload("../runtime/scroll_rect.gd")
 
 var _checks: int = 0
 var _failed: Array = []
@@ -56,6 +57,7 @@ func _init() -> void:
 	_graphics()
 	_sprites()
 	await _selectables()
+	await _scroll_rect()
 	print("[rect_transform_test] %d checks, %d failure(s)" % [_checks, _failed.size()])
 	print("RECT TRANSFORM TESTS " + ("PASSED" if _failed.is_empty() else "FAILED"))
 	quit(0 if _failed.is_empty() else 1)
@@ -748,6 +750,25 @@ func _sprites() -> void:
 	r = Sprite.fill_rects(Vector2(64, 96), Vector2(64, 64), 1, 1, 0.25)
 	near(r[0], Rect2(0, 0, 64, 24), "from the top, a quarter")
 	near(r[1], Rect2(0, 0, 64, 16), "... the upper quarter of the sprite")
+	# tiled (Image.GenerateTiledSprite): a 64 pixel sprite with 16 pixel borders in 150 x 90
+	var q: Array = Sprite.tiled_quads(Vector2(150, 90), s64, b16, 1.0, true)
+	# centre 118 x 58 in tiles of 32: 4 x 2 (the last of each cut), + 2 x 2 side and 2 x 4 top /
+	# bottom edge pieces + 4 corners
+	eq(q.size(), 8 + 4 + 8 + 4, "tiled with borders: centre tiles, edge pieces and corners")
+	near(q[0][0], Rect2(16, 42, 32, 32), "the first centre tile sits at the bottom-left of the centre")
+	near(q[0][1], Rect2(16, 16, 32, 32), "... and shows the sprite's centre")
+	near(q[3][0], Rect2(112, 42, 22, 32), "the last tile of the row is cut at the right border")
+	near(q[3][1], Rect2(16, 16, 22, 32), "... and shows the left part of the centre")
+	near(q[4][0], Rect2(16, 16, 32, 26), "the upper row is cut at the top border")
+	near(q[4][1], Rect2(16, 22, 32, 26), "... and shows the lower part of the centre (tiles grow from the bottom)")
+	near(Sprite.tiled_texel(Vector2(8, 82), Vector2(150, 90), s64, b16, 1.0, true), Vector2(8, 56), "the bottom-left corner is the sprite's")
+	near(Sprite.tiled_texel(Vector2(8, 50), Vector2(150, 90), s64, b16, 1.0, true), Vector2(8, 24), "the left edge repeats along y")
+	ok(Sprite.tiled_texel(Vector2(60, 50), Vector2(150, 90), s64, b16, 1.0, false) == null, "without fill centre the middle is empty")
+	q = Sprite.tiled_quads(Vector2(160, 40), Vector2(64, 16), [0, 0, 0, 0], 1.0, true)
+	eq(q.size(), 9, "tiled without borders: 2.5 x 2.5 copies of the sprite")
+	near(q[0][0], Rect2(0, 24, 64, 16), "... from the bottom-left corner")
+	near(q[8][0], Rect2(128, 0, 32, 8), "... the last one cut on both axes")
+	near(q[8][1], Rect2(0, 8, 32, 8), "... to its lower left part")
 	# the helper is coloured by the graphic's state, the control itself draws nothing
 	var img := TextureRect.new()
 	img.texture = PlaceholderTexture2D.new()
@@ -762,3 +783,105 @@ func _sprites() -> void:
 	eq(helper.self_modulate.a, 0.0, "a disabled sliced Image draws nothing")
 	img.free()
 
+
+
+
+## A Unity scroll view: 200 x 200, viewport stretched over it (pivot top-left), content 500 high
+## anchored to the viewport's top, a vertical scrollbar at the right edge.
+func _scroll_view(parent: Control, content_height: float, visibility: int) -> Array:
+	var host := Control.new()
+	host.name = "Scroll"
+	parent.add_child(host)
+	_rt(host, {"size_delta": Vector2(200, 200)})
+	var view := Control.new()
+	view.name = "Viewport"
+	view.clip_contents = true
+	host.add_child(view)
+	_rt(view, {"anchor_min": Vector2(0, 0), "anchor_max": Vector2(1, 1), "pivot": Vector2(0, 1), "size_delta": Vector2.ZERO})
+	var content := Control.new()
+	content.name = "Content"
+	view.add_child(content)
+	_rt(content, {"anchor_min": Vector2(0, 1), "anchor_max": Vector2(1, 1), "pivot": Vector2(0, 1), "size_delta": Vector2(0, content_height)})
+	var bar := VScrollBar.new()
+	bar.name = "Bar"
+	bar.min_value = 0.0
+	bar.max_value = 1.0
+	bar.step = 0.0
+	bar.page = 0.0
+	host.add_child(bar)
+	_rt(bar, {"anchor_min": Vector2(1, 0), "anchor_max": Vector2(1, 1), "pivot": Vector2(1, 1), "size_delta": Vector2(20, 0)})
+	var area := Control.new()
+	area.name = "Area"
+	bar.add_child(area)
+	_rt(area, {"anchor_min": Vector2(0, 0), "anchor_max": Vector2(1, 1), "size_delta": Vector2(-20, -20)})
+	var handle: TextureRect = _image(area, "Handle", {"anchor_min": Vector2(0, 0), "anchor_max": Vector2(1, 0.2), "size_delta": Vector2(20, 20)})
+	bar.set_meta(&"unidot_scrollbar", {"direction": 2, "size": 0.2})
+	bar.set_meta(Selectable.META, {"transition": 0, "handle": bar.get_path_to(handle), "direction": 2})
+	host.set_meta(Scroll.META, {"content": host.get_path_to(content), "viewport": host.get_path_to(view), "vbar": host.get_path_to(bar),
+		"horizontal": false, "vertical": true, "movement": 2, "sensitivity": 20.0, "visibility": [0, visibility], "spacing": [0.0, -3.0]})
+	return [host, view, content, bar, handle]
+
+
+## ScrollRect: bounds, normalized position, clamping, scrollbar size / value / handle, the
+## viewport that makes room for the bar. Numbers by Unity's rules.
+func _scroll_rect() -> void:
+	var parent := Control.new()
+	parent.size = Vector2(600, 600)
+	root.add_child(parent)
+	var s: Array = _scroll_view(parent, 500.0, 0)
+	await process_frame
+	Scroll.update(s[0])
+	near(Scroll.normalized(s[0]), Vector2(0, 1), "content at the top: normalized position (0, 1)")
+	near((s[3] as Range).value, 1.0, "the scrollbar's value is the normalized position")
+	near(float(s[3].get_meta(&"unidot_scrollbar")["size"]), 0.4, "its size is the share of the content in view (200 of 500)")
+	near(RT.anchor_min(s[4]), Vector2(0, 0.6), "the handle spans that share, at the top (Scrollbar.UpdateVisuals)")
+	near(RT.anchor_max(s[4]), Vector2(1, 1.0), "... up to the end")
+	near(RT.rect_size(s[1]), Vector2(200, 200), "a permanent scrollbar leaves the viewport alone")
+	Scroll.set_normalized(s[0], 0.0, 1)
+	near(RT.anchored_position(s[2]), Vector2(0, 300), "normalized 0: the content moved up by what was hidden")
+	Scroll.update(s[0])
+	near((s[3] as Range).value, 0.0, "... and the bar follows")
+	near(RT.anchor_max(s[4]), Vector2(1, 0.4), "... with its handle at the bottom")
+	Scroll.set_normalized(s[0], 0.5, 1)
+	near(RT.anchored_position(s[2]), Vector2(0, 150), "normalized 0.5: half way")
+	Scroll.scroll_by(s[0], Vector2(0, 1000))
+	near(RT.anchored_position(s[2]), Vector2(0, 300), "scrolling past the end stops at the end (clamped)")
+	Scroll.scroll_by(s[0], Vector2(50, -20))
+	near(RT.anchored_position(s[2]), Vector2(0, 280), "a horizontal delta does nothing on a vertical rect")
+	RT.set_anchored_position(s[2], Vector2(0, 900))
+	Scroll.update(s[0])
+	near(RT.anchored_position(s[2]), Vector2(0, 300), "content put outside the view is brought back")
+	# a helper node: the bar scrolls the rect, the rect raises `scrolled`
+	var helper := Node.new()
+	helper.name = Scroll.HELPER
+	helper.set_script(Scroll)
+	s[0].add_child(helper)
+	var events: Array = []
+	helper.scrolled.connect(func(v: Vector2) -> void: events.append(v))
+	await process_frame
+	await process_frame
+	(s[3] as Range).value = 1.0
+	near(RT.anchored_position(s[2]), Vector2(0, 0), "scrollbar.value = 1 scrolls to the top")
+	await process_frame
+	await process_frame
+	ok(events.size() >= 1 and (events[-1] as Vector2).is_equal_approx(Vector2(0, 1)), "onValueChanged was raised with the normalized position: " + str(events))
+	# content smaller than the view: nothing to scroll, the bar is full
+	var small: Array = _scroll_view(parent, 120.0, 1)
+	await process_frame
+	Scroll.update(small[0])
+	near(float(small[3].get_meta(&"unidot_scrollbar")["size"]), 1.0, "content that fits: the handle fills the bar")
+	ok(not (small[3] as Control).visible, "... and an auto-hiding bar is hidden")
+	Scroll.scroll_by(small[0], Vector2(0, 50))
+	near(RT.anchored_position(small[2]), Vector2(0, 0), "... and nothing scrolls")
+	# auto hide and expand: the viewport gives way to the bar while it is needed
+	var expand: Array = _scroll_view(parent, 500.0, 2)
+	await process_frame
+	Scroll.update(expand[0])
+	near(RT.rect_size(expand[1]), Vector2(183, 200), "the viewport makes room for the bar (20 wide, spacing -3)")
+	ok((expand[3] as Control).visible, "... which is shown")
+	RT.set_size_delta(expand[2], Vector2(0, 100))
+	Scroll.update(expand[0])
+	near(RT.rect_size(expand[1]), Vector2(200, 200), "content that fits again: the viewport is whole")
+	ok(not (expand[3] as Control).visible, "... and the bar hidden")
+	parent.queue_free()
+	await process_frame
