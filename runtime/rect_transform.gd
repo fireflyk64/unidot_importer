@@ -1085,6 +1085,11 @@ static func sync_island(holder: Node) -> void:
 		view.visible = inline and shown
 		if inline and shown:
 			_place_view(holder, view, cfg)
+	# a canvas nobody sees is not rendered
+	var vp: SubViewport = holder.get_node_or_null(cfg.get("viewport", NodePath())) as SubViewport
+	var mode: int = SubViewport.UPDATE_ALWAYS if shown else SubViewport.UPDATE_DISABLED
+	if vp != null and vp.render_target_update_mode != mode:
+		vp.render_target_update_mode = mode
 	var on_plane: bool = shown and not inline
 	if plane.visible != on_plane:
 		plane.visible = on_plane

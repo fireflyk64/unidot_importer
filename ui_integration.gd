@@ -77,14 +77,76 @@ func set_database(db) -> void:
 func handle_monobehaviour(obj: RefCounted, state: RefCounted, node: Node, _existing: Node):
 	if node == null:
 		return null
-	var ctl: Control = control_of(node)
-	if ctl == null:
-		return null
 	var guid: String = str(obj.monoscript[2]) if obj.monoscript[2] != null else ""
 	var kind: String = identify(guid, obj.keys, _to_int(obj.monoscript[1]), obj.meta)
+	var ctl: Control = control_of(node)
+	if ctl == null:
+		if kind == "TextMeshPro" and node is Node3D:
+			_text_mesh_3d(obj, state, node)
+		return null
 	if kind != "":
 		configure_component(kind, obj, state, ctl)
 	return null
+
+
+## TextMeshPro (the 3D text, on a GameObject outside any canvas) becomes a Label3D. The font
+## size of a 3D text is in tenths of a unit per em; the text box is the object's RectTransform.
+func _text_mesh_3d(obj: RefCounted, state: RefCounted, node: Node3D) -> void:
+	var keys: Dictionary = obj.keys
+	var label := Label3D.new()
+	label.name = "TextMeshPro"
+	label.text = _strip_tags(str(keys.get("m_text", "")) if keys.get("m_text") != null else "")
+	var size: float = maxf(_to_float(keys.get("m_fontSize", 36.0)), 0.01)
+	label.font_size = 64
+	label.outline_size = 0
+	label.pixel_size = size / 10.0 / 64.0
+	if keys.get("m_fontColor") is Color:
+		label.modulate = keys["m_fontColor"]
+	var rect: Vector2 = Vector2.ZERO
+	var pivot: Vector2 = Vector2(0.5, 0.5)
+	var go = obj.gameObject
+	if go != null and go.transform != null:
+		var tk: Dictionary = go.transform.keys
+		if tk.get("m_SizeDelta") is Vector2:
+			rect = tk["m_SizeDelta"]
+		if tk.get("m_Pivot") is Vector2:
+			pivot = tk["m_Pivot"]
+	var x: float = 0.5
+	match _to_int(keys.get("m_HorizontalAlignment", 1)):
+		1:
+			label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+			x = 0.0
+		4:
+			label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+			x = 1.0
+		8:
+			label.horizontal_alignment = HORIZONTAL_ALIGNMENT_FILL
+			x = 0.0
+		_:
+			label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var y: float = 0.5
+	match _to_int(keys.get("m_VerticalAlignment", 256)):
+		256:
+			label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+			y = 1.0
+		1024:
+			label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+			y = 0.0
+		_:
+			label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	if rect.x > 0.0 and _to_int(keys.get("m_enableWordWrapping", 0)) != 0:
+		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		label.width = rect.x / label.pixel_size
+	# readable from the object's -z side like every Unity text; x is mirrored in the Godot scene
+	label.transform = Transform3D(Basis.from_euler(Vector3(0.0, PI, 0.0)), Vector3(-(x - pivot.x) * rect.x, (y - pivot.y) * rect.y, 0.0))
+	state.add_child(label, node, obj)
+	stats["text_3d"] = int(stats.get("text_3d", 0)) + 1
+
+
+static func _strip_tags(s: String) -> String:
+	var re := RegEx.new()
+	re.compile("<[^>]*>")
+	return re.sub(s, "", true)
 
 
 func handle_scripted_object(_obj: RefCounted):

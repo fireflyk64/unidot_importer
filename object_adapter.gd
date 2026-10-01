@@ -5243,6 +5243,14 @@ class UnidotRectTransform:
 	func convert_properties(node: Node, uprops: Dictionary) -> Dictionary:
 		if rect_transform.is_ui(node):
 			return ui_integration.rect_override_properties(node, uprops)
+		# A RectTransform that became a plain Node3D (outside any canvas: a TextMeshPro 3D text).
+		# Unity leaves m_LocalPosition x / y at 0 for RectTransforms; without a parent rect the
+		# local position is the anchored position.
+		if uprops.get("m_AnchoredPosition") is Vector2:
+			var ap: Vector2 = uprops["m_AnchoredPosition"]
+			var lp: Vector3 = uprops["m_LocalPosition"] if uprops.get("m_LocalPosition") is Vector3 else Vector3.ZERO
+			uprops = uprops.duplicate()
+			uprops["m_LocalPosition"] = Vector3(ap.x, ap.y, lp.z)
 		return super.convert_properties(node, uprops)
 
 	# (the Transform version records scale signs of Node3D scales)
