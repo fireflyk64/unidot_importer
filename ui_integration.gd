@@ -701,16 +701,23 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 				var opts = keys.get("m_Options", {})
 				if opts is Dictionary:
 					for o in opts.get("m_Options", []):
-						ctl.add_item(str(o.get("m_Text", "")) if o is Dictionary else str(o))
+						ctl.add_item(str(o.get("m_Text", "")) if o is Dictionary and o.get("m_Text") != null else ("" if o is Dictionary else str(o)))
+						if o is Dictionary and typeof(o.get("m_Image")) == TYPE_ARRAY:
+							var option_image: Texture2D = _sprite(o["m_Image"], obj).get("texture")
+							if option_image != null:
+								ctl.set_item_icon(ctl.item_count - 1, option_image)
 				ctl.selected = _to_int(keys.get("m_Value", 0))
-				# Unity draws the caption with its own Text child (built later): the runtime
-				# dropdown script hides the button's own text and keeps that label up to date
-				ctl.set_meta("unidot_dropdown", {})
-				if keys.has("m_CaptionText"):
-					var cap: NodePath = _ref_path(keys["m_CaptionText"], obj, ctl, "unidot_dropdown", "caption")
-					if cap != NodePath():
-						ctl.set_meta("unidot_dropdown", {"caption": cap})
-				ctl.set_script(dropdown_script)
+				# Unity draws the caption and the list with its own objects (built later): the helper
+				# child (runtime/dropdown.gd) keeps the caption up to date and builds the list from
+				# the template object
+				ctl.set_meta(dropdown_script.META, {})
+				for pair in [["m_CaptionText", "caption"], ["m_CaptionImage", "caption_image"], ["m_Template", "template"], ["m_ItemText", "item_text"], ["m_ItemImage", "item_image"]]:
+					var dp: NodePath = _ref_path(keys.get(pair[0]), obj, ctl, String(dropdown_script.META), pair[1])
+					if dp != NodePath():
+						var dc: Dictionary = ctl.get_meta(dropdown_script.META)
+						dc[pair[1]] = dp
+						ctl.set_meta(dropdown_script.META, dc)
+				_ensure_helper(ctl, state, dropdown_script.HELPER, dropdown_script)
 			_selectable(ctl, keys, obj, state)
 			_events(keys.get("m_OnValueChanged"), ctl, "item_selected", 1, state, obj)
 		"ScrollRect":
