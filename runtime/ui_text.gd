@@ -182,6 +182,7 @@ static func set_fonts(n: Node, fonts: Array = FONTS) -> void:
 ## TextMeshPro's overflow modes that show only whole lines (Ellipsis, Truncate, Page, Linked);
 ## uGUI's vertical Truncate is stored as 3.
 const CUT_MODES := [1, 3, 5, 6]
+const ELLIPSIS := 1
 
 
 ## Does the drawing of a text with these settings depend on its rect (→ the helper child)?
@@ -207,10 +208,13 @@ static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
 	var mode: int = int(s.get("overflow", 0))
 	var content: float = 0.0
 	var over: bool = false
+	# a line that is not wrapped and is wider than the rect is cut as well
+	var wide: bool = false
 	if n.is_inside_tree() and n.size.x > 0.0:
 		content = float(n.get_content_height())
 		over = content > n.size.y + 0.5
-	if not over:
+		wide = mode in CUT_MODES and n.autowrap_mode == TextServer.AUTOWRAP_OFF and float(n.get_content_width()) > n.size.x + 0.5
+	if not over and not wide:
 		if drawer != null:
 			n.remove_child(drawer)
 			drawer.queue_free()
@@ -245,7 +249,31 @@ static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
 	# what is drawn: everything, or the lines that fit entirely
 	var shown: float = content
 	var characters: int = -1
-	if mode in CUT_MODES:
+	if mode == ELLIPSIS or (wide and mode in CUT_MODES):
+		# the longest beginning of the text that fits the rect (with the ellipsis after it, in
+		# TextMeshPro's Ellipsis mode): found by laying it out
+		var raw: String = str(s.get("text", ""))
+		var rich: bool = bool(s.get("rich", true))
+		var tmp: bool = bool(s.get("tmp", true))
+		var style: int = int(s.get("style", 0))
+		var size: float = float(n.get_theme_font_size("normal_font_size"))
+		var total: int = visible_length(raw, rich, tmp)
+		var tail: String = "…" if mode == ELLIPSIS else ""
+		var wrapped: bool = n.autowrap_mode != TextServer.AUTOWRAP_OFF
+		var lo: int = 0
+		var hi: int = total
+		while lo < hi:
+			var mid: int = (lo + hi + 1) / 2
+			drawer.text = to_bbcode(raw, rich, style, size, tmp, mid, tail if mid < total else "")
+			if float(drawer.get_content_height()) <= n.size.y + 0.5 and (wrapped or float(drawer.get_content_width()) <= n.size.x + 0.5):
+				lo = mid
+			else:
+				hi = mid - 1
+		drawer.text = to_bbcode(raw, rich, style, size, tmp, lo, tail if lo < total else "")
+		shown = minf(float(drawer.get_content_height()), n.size.y) if lo > 0 else 0.0
+		if lo == 0:
+			drawer.text = ""   # (not even one character and the ellipsis)
+	elif mode in CUT_MODES:
 		var fit: Array = whole_lines(n)
 		shown = fit[0]
 		characters = fit[1]
@@ -367,8 +395,11 @@ static func strip_tags(t: String) -> String:
 
 
 ## Unity rich text → BBCode. A `<...>` that is not a tag is text, as in Unity (`<<`, `<3`).
-static func to_bbcode(t: String, rich: bool, style: int, base_size: float, tmp: bool = true) -> String:
+## `limit`: at most that many characters of the text are shown (as `visible_length` counts
+## them: text and line breaks), with `tail` after them when the text is longer (an ellipsis).
+static func to_bbcode(t: String, rich: bool, style: int, base_size: float, tmp: bool = true, limit: int = -1, tail: String = "") -> String:
 	var out: String = ""
+	var left: int = limit
 	if style & BOLD:
 		out += "[b]"
 	if style & ITALIC:
@@ -386,6 +417,16 @@ static func to_bbcode(t: String, rich: bool, style: int, base_size: float, tmp: 
 	for piece in pieces:
 		var tag: String = piece[0]
 		var value: String = piece[1]
+		if limit >= 0 and (tag == "" or tag == "br"):
+			var length: int = value.length() if tag == "" else 1
+			if length > left:
+				# the cut: what still fits of this piece (no blanks before the tail), the tail,
+				# and nothing after it
+				if tag == "" and left > 0:
+					out += _cased_bbcode(value.substr(0, left).rstrip(" \t"), upper, lower, small, float(sizes.back()))
+				out += _escape(tail)
+				break
+			left -= length
 		match tag:
 			"":
 				out += _cased_bbcode(value, upper, lower, small, float(sizes.back()))
@@ -446,6 +487,19 @@ static func to_bbcode(t: String, rich: bool, style: int, base_size: float, tmp: 
 	if style & BOLD:
 		out += "[/b]"
 	return out
+
+
+## The number of characters a text shows (its tags are not shown; a line break is one).
+static func visible_length(t: String, rich: bool, tmp: bool = true) -> int:
+	if not rich:
+		return t.length()
+	var count: int = 0
+	for piece in _tokens(t, tmp):
+		if piece[0] == "":
+			count += (piece[1] as String).length()
+		elif piece[0] == "br":
+			count += 1
+	return count
 
 
 static func _case(t: String, upper: int, lower: int) -> String:

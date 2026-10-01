@@ -664,6 +664,43 @@ func _text_nodes() -> void:
 	UiText.update(cut, {"overflow": 2})
 	cut_drawer = cut.get_node_or_null(UiText.DRAWER) as RichTextLabel
 	ok(cut_drawer != null and cut_drawer.visible_characters == -1 and cut.clip_contents, "a masked text is drawn whole and clipped at the rect")
+	# TextMeshPro's Ellipsis mode: the text ends in an ellipsis where it is cut
+	var ell: RichTextLabel = _text(host, {"text": "one<br>two<br>three", "size": 20.0, "overflow": 1}, Vector2(200, 50))
+	await process_frame
+	UiText.layout(ell)
+	var ell_drawer: RichTextLabel = ell.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(ell_drawer != null, "an Ellipsis text higher than its rect is drawn by the child")
+	if ell_drawer != null:
+		eq(ell_drawer.get_parsed_text(), "one\ntwo…", "the lines that fit, the last one ending in the ellipsis")
+		eq(ell.get_parsed_text(), "one\ntwo\nthree", "... while the node keeps the whole text")
+		eq(UiText.text(ell), "one<br>two<br>three", "... and the Unity string")
+	# ... and a line that is not wrapped is cut at the rect's width
+	var name_text: String = "A player name that is much too long for its column"
+	var wide: RichTextLabel = _text(host, {"text": "<b>" + name_text + "</b>", "size": 20.0, "overflow": 1, "wrap": false}, Vector2(160, 30))
+	await process_frame
+	UiText.layout(wide)
+	var wide_drawer: RichTextLabel = wide.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(wide_drawer != null and float(wide.get_content_width()) > 160.0, "a line wider than its rect, not wrapped")
+	if wide_drawer != null:
+		var shown: String = wide_drawer.get_parsed_text()
+		ok(shown.ends_with("…") and shown.length() > 4 and name_text.begins_with(shown.trim_suffix("…")), "... shows its beginning and an ellipsis: " + shown)
+		ok(float(wide_drawer.get_content_width()) <= 160.5, "... which fit the rect: %d" % wide_drawer.get_content_width())
+		ok(not shown.trim_suffix("…").ends_with(" "), "... without a blank before the ellipsis")
+		ok(wide_drawer.text.begins_with("[b]"), "... in the text's style")
+		# more would not fit (two characters: the next one may be a blank, which is not shown
+		# before the ellipsis)
+		var longer: String = UiText.to_bbcode("<b>" + name_text + "</b>", true, 0, 20.0, true, shown.length() + 1, "…")
+		wide_drawer.text = longer
+		ok(float(wide_drawer.get_content_width()) > 160.5, "... and more of it would not")
+		UiText.layout(wide)
+	UiText.update(wide, {"overflow": 3})
+	wide_drawer = wide.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(wide_drawer != null and not wide_drawer.get_parsed_text().ends_with("…") and name_text.begins_with(wide_drawer.get_parsed_text()) and float(wide_drawer.get_content_width()) <= 160.5,
+		"Truncate cuts the line at the rect without an ellipsis: " + (wide_drawer.get_parsed_text() if wide_drawer != null else "no child"))
+	UiText.set_text(wide, "Short")
+	ok(wide.get_node_or_null(UiText.DRAWER) == null, "a line that fits is drawn by the node itself")
+	eq(UiText.visible_length("a<b>bc</b><br>d <unknown>", true, true), 15, "the characters a text shows: tags are not counted, a break is one, an unknown tag is text")
+	eq(UiText.to_bbcode("ab<br>cd", true, 0, 20.0, true, 3, "…"), "ab\n…", "a cut at a line's first character")
 	# a hand-built Label has no Unity settings: the plain properties are used
 	var l := Label.new()
 	host.add_child(l)
