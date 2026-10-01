@@ -8,13 +8,45 @@ const object_adapter_class := preload("./object_adapter.gd")
 const scene_node_state_class := preload("./scene_node_state.gd")
 
 
+## Unity's order of the roots of a scene. Unity 2022.2 and later list them in the SceneRoots
+## object (the file id of each root's Transform, or of the PrefabInstance of a root that is one);
+## older files have m_RootOrder in every Transform (in the modifications of a prefab instance).
+var _scene_roots: Dictionary = {}  # file id → index in SceneRoots.m_Roots
+
+
+func _read_scene_roots(assets: Array) -> void:
+	_scene_roots = {}
+	for asset in assets:
+		if str(asset.type) == "SceneRoots" and asset.keys.get("m_Roots") is Array:
+			for ref in asset.keys["m_Roots"]:
+				if ref is Array and ref.size() >= 2:
+					_scene_roots[int(ref[1])] = _scene_roots.size()
+
+
+func _root_index(a) -> int:
+	if not _scene_roots.is_empty():
+		if a.transform != null and _scene_roots.has(a.transform.fileID):
+			return _scene_roots[a.transform.fileID]
+		return _scene_roots.get(a.fileID, _scene_roots.size())
+	if a.transform != null:
+		return a.transform.rootOrder
+	var mod = a.keys.get("m_Modification")
+	if mod is Dictionary and mod.get("m_Modifications") is Array:
+		for m in mod["m_Modifications"]:
+			if m is Dictionary and str(m.get("propertyPath", "")) == "m_RootOrder":
+				return str(m.get("value", "0")).to_int()
+	return 0
+
+
 func customComparison(a, b):
 	if typeof(a) != typeof(b):
 		return typeof(a) < typeof(b)
-	elif a.transform != null && b.transform != null:
-		return a.transform.rootOrder < b.transform.rootOrder
-	else:
-		return b.fileID < a.fileID
+	var ia: int = _root_index(a)
+	var ib: int = _root_index(b)
+	if ia != ib:
+		return ia < ib
+	# (the sort is not stable: without an order in the file, the order of the objects in it)
+	return a.fileID < b.fileID
 
 
 func smallestTransform(a, b):
@@ -270,6 +302,7 @@ func pack_scene(pkgasset, is_prefab) -> PackedScene:
 	node_state.env = env
 	node_state.set_main_name_map(node_state.prefab_state.gameobject_name_map, node_state.prefab_state.prefab_gameobject_name_map)
 
+	_read_scene_roots(pkgasset.parsed_asset.assets.values())
 	arr.sort_custom(customComparison)
 	for asset in arr:
 		if asset.is_stripped:
