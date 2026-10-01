@@ -29,6 +29,7 @@ const text_fit_script := preload("./runtime/ui_text_fit.gd")
 const sprite_script := preload("./runtime/ui_sprite.gd")
 const Graphic := preload("./runtime/ui_graphic.gd")
 const UiText := preload("./runtime/ui_text.gd")
+const UiGroup := preload("./runtime/canvas_group.gd")
 
 ## Metadata of a Control: {file id of a Unity UI component on its GameObject → kind}. Overrides
 ## of a prefab instance name the component by that id.
@@ -270,6 +271,20 @@ func identify(guid: String, keys: Dictionary, file_id: int = 0, meta: Resource =
 	if keys.has("m_Texture") and keys.has("m_UVRect"):
 		return "RawImage"
 	return ""
+
+
+## A CanvasGroup component (or the overrides of one on a prefab instance) on its Control:
+## runtime/canvas_group.gd applies alpha, interactable and blocksRaycasts.
+static func canvas_group(ctl: Control, keys: Dictionary) -> void:
+	var changes: Dictionary = {}
+	for pair in [["m_Interactable", "interactable"], ["m_BlocksRaycasts", "blocksRaycasts"], ["m_IgnoreParentGroups", "ignoreParentGroups"]]:
+		if keys.has(pair[0]):
+			changes[pair[1]] = keys[pair[0]] != 0
+	if keys.has("m_Alpha"):
+		changes["alpha"] = float(keys["m_Alpha"])
+	if keys.has("m_Enabled") and keys["m_Enabled"] == 0:
+		changes = {"alpha": 1.0, "interactable": true, "blocksRaycasts": true, "ignoreParentGroups": false}   # a disabled group does nothing
+	UiGroup.update(ctl, changes)
 
 
 ## The Unity values of a serialized RectTransform (see RT.values).

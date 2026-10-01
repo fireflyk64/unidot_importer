@@ -24,6 +24,7 @@ extends Node
 
 const RT := preload("./rect_transform.gd")
 const Graphic := preload("./ui_graphic.gd")
+const UiGroup := preload("./canvas_group.gd")
 const META := &"unidot_selectable"
 const HELPER := "UnidotSelectable"
 
@@ -95,7 +96,10 @@ func selection_state() -> String:
 	return "normal"
 
 
+## Selectable.IsInteractable: its own flag, and the canvas groups above it.
 static func interactable(host: Control) -> bool:
+	if not UiGroup.allows_interaction(host):
+		return false
 	if host is BaseButton:
 		return not host.disabled
 	if host is Slider or host is LineEdit:

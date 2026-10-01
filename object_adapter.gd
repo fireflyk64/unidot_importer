@@ -6949,14 +6949,18 @@ class UnidotCanvasGroup:
 	# Applies to the GameObject's Control: alpha → modulate, interactable/blocksRaycasts → mouse filter.
 
 	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
-		var target: Node = ui_integration.control_of(new_parent)
-		if target is CanvasItem:
-			target.modulate.a = clampf(float(keys.get("m_Alpha", 1.0)), 0.0, 1.0)
-		if target is Control:
-			var interactable: bool = keys.get("m_Interactable", 1) != 0 and keys.get("m_BlocksRaycasts", 1) != 0
-			target.mouse_filter = Control.MOUSE_FILTER_STOP if interactable else Control.MOUSE_FILTER_IGNORE
-			target.set_meta("unidot_canvas_group", {"alpha": float(keys.get("m_Alpha", 1.0)), "interactable": keys.get("m_Interactable", 1) != 0, "blocksRaycasts": keys.get("m_BlocksRaycasts", 1) != 0, "ignoreParentGroups": keys.get("m_IgnoreParentGroups", 0) != 0})
+		var target: Control = ui_integration.control_of(new_parent)
+		if target != null:
+			state.add_fileID(target, self)
+			ui_integration.canvas_group(target, keys)
 		return null
+
+	# Overrides of a prefab instance: the same settings, changed.
+	func convert_properties(node: Node, uprops: Dictionary) -> Dictionary:
+		var target: Control = ui_integration.control_of(node)
+		if target != null:
+			ui_integration.canvas_group(target, uprops)
+		return {}
 
 
 class UnidotMonoBehaviour:

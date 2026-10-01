@@ -18,8 +18,10 @@ extends RefCounted
 ## A text whose drawing depends on its rect (auto-sizing, or text that may run out of the rect)
 ## has a helper child (runtime/ui_text_fit.gd) that calls `layout` when the rect changes.
 ##
-## Overflow: Unity draws every line of a text that is higher than its rect, around the point
-## its vertical alignment gives (TextMeshPro's overflow mode, uGUI's vertical overflow). A
+## A text higher than its rect: Unity places what it draws by the vertical alignment. In
+## overflow mode (TextMeshPro's default, uGUI's vertical overflow) every line is drawn, around
+## the alignment point; a text that is truncated (uGUI's default, TextMeshPro's Truncate and
+## Ellipsis) shows the lines that fit entirely; a masked one is clipped at the rect. A
 ## RichTextLabel draws from the top and leaves out the lines that start below its rect, so such
 ## a text is drawn by a child label as high as the content ("UnidotTextOverflow"), placed by
 ## the alignment, while the node itself keeps the Unity rect and the text.
@@ -177,9 +179,15 @@ static func set_fonts(n: Node, fonts: Array = FONTS) -> void:
 		n.add_theme_font_override("font", fonts[0])
 
 
+## TextMeshPro's overflow modes that show only whole lines (Ellipsis, Truncate, Page, Linked);
+## uGUI's vertical Truncate is stored as 3.
+const CUT_MODES := [1, 3, 5, 6]
+
+
 ## Does the drawing of a text with these settings depend on its rect (→ the helper child)?
-static func needs_layout(s: Dictionary) -> bool:
-	return bool(s.get("auto", false)) or int(s.get("overflow", 0)) == 0
+## Any text may be higher than its rect.
+static func needs_layout(_s: Dictionary) -> bool:
+	return true
 
 
 ## What depends on the rect: the font size of an auto-sized text, and whether the text runs out
@@ -196,9 +204,10 @@ static func layout(n: Node) -> void:
 ## A text higher than its rect is drawn by a child as high as the content (see above).
 static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
 	var drawer: RichTextLabel = n.get_node_or_null(DRAWER) as RichTextLabel
+	var mode: int = int(s.get("overflow", 0))
 	var content: float = 0.0
 	var over: bool = false
-	if int(s.get("overflow", 0)) == 0 and n.is_inside_tree() and n.size.x > 0.0:
+	if n.is_inside_tree() and n.size.x > 0.0:
 		content = float(n.get_content_height())
 		over = content > n.size.y + 0.5
 	if not over:
@@ -232,15 +241,53 @@ static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
 	drawer.vertical_alignment = VERTICAL_ALIGNMENT_TOP
 	drawer.self_modulate = n.self_modulate
 	drawer.text = n.text
+	drawer.size = Vector2(n.size.x, content)
+	# what is drawn: everything, or the lines that fit entirely
+	var shown: float = content
+	var characters: int = -1
+	if mode in CUT_MODES:
+		var fit: Array = whole_lines(n)
+		shown = fit[0]
+		characters = fit[1]
+	drawer.visible_characters = characters
 	var y: float = 0.0
 	match n.vertical_alignment:
 		VERTICAL_ALIGNMENT_CENTER:
-			y = (n.size.y - content) * 0.5
+			y = (n.size.y - shown) * 0.5
 		VERTICAL_ALIGNMENT_BOTTOM:
-			y = n.size.y - content
+			y = n.size.y - shown
 	drawer.position = Vector2(0.0, y)
-	drawer.size = Vector2(n.size.x, content)
 	n.visible_characters = 0   # the node keeps the text (and measures it) but does not draw it
+
+
+## The lines of a text that fit its rect entirely: [their height, the number of characters
+## in them].
+static func whole_lines(n: RichTextLabel) -> Array:
+	var lines: int = n.get_line_count()
+	var content: float = float(n.get_content_height())
+	var last: int = -1
+	var height: float = 0.0
+	for i in range(lines):
+		var bottom: float = n.get_line_offset(i + 1) if i + 1 < lines else content
+		if bottom > n.size.y + 0.5:
+			break
+		last = i
+		height = bottom
+	if last < 0:
+		return [0.0, 0]
+	if last == lines - 1:
+		return [height, -1]
+	# the characters up to the first one of the line after the last that fits
+	var total: int = n.get_total_character_count()
+	var lo: int = 0
+	var hi: int = total
+	while lo < hi:
+		var mid: int = (lo + hi) / 2
+		if n.get_character_line(mid) > last:
+			hi = mid
+		else:
+			lo = mid + 1
+	return [height, lo]
 
 
 ## Auto-sizing (TextMeshPro's enableAutoSizing, uGUI's best fit): the largest size between `min`

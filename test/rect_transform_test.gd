@@ -14,6 +14,7 @@ const Selectable := preload("../runtime/selectable.gd")
 const TextFit := preload("../runtime/ui_text_fit.gd")
 const Sprite := preload("../runtime/ui_sprite.gd")
 const Scroll := preload("../runtime/scroll_rect.gd")
+const UiGroup := preload("../runtime/canvas_group.gd")
 
 var _checks: int = 0
 var _failed: Array = []
@@ -554,9 +555,21 @@ func _text_nodes() -> void:
 	o.size = Vector2(200, 10)
 	await process_frame
 	ok(o.get_node_or_null(UiText.DRAWER) != null, "a rect that shrinks below one line: the child is back")
-	var cut: RichTextLabel = _text(host, {"text": "one<br>two<br>three", "size": 20.0, "overflow": 3}, Vector2(200, 30))
+	# a text that is truncated shows the lines that fit entirely, placed by the alignment
+	var cut: RichTextLabel = _text(host, {"text": "one<br>two<br>three", "size": 20.0, "overflow": 3}, Vector2(200, 50))
+	cut.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	await process_frame
 	UiText.layout(cut)
-	ok(cut.get_node_or_null(UiText.DRAWER) == null and cut.clip_contents, "a text that is cut at its rect is not drawn outside")
+	var cut_drawer: RichTextLabel = cut.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(cut_drawer != null and cut.clip_contents, "a truncated text higher than its rect is drawn by the child too, inside the rect")
+	if cut_drawer != null:
+		var two: float = cut.get_line_offset(2)
+		ok(two <= 50.5 and float(cut.get_content_height()) > 50.5, "two of three lines fit a rect of 50: %.0f of %d" % [two, cut.get_content_height()])
+		eq(cut_drawer.visible_characters, 8, "... and only they are shown (the characters of 'one' and 'two' with their line ends)")
+		near(cut_drawer.position.y, (50.0 - two) * 0.5, "... centred as two lines")
+	UiText.update(cut, {"overflow": 2})
+	cut_drawer = cut.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(cut_drawer != null and cut_drawer.visible_characters == -1 and cut.clip_contents, "a masked text is drawn whole and clipped at the rect")
 	# a hand-built Label has no Unity settings: the plain properties are used
 	var l := Label.new()
 	host.add_child(l)
@@ -709,6 +722,33 @@ func _selectables() -> void:
 	toggle.set_pressed_no_signal(false)
 	Selectable.refresh_host(toggle)
 	eq(mark.self_modulate.a, 0.0, "... and off without a signal, refreshed by the caller")
+	# canvas groups: a group that is not interactable disables the selectables below it
+	var group := Control.new()
+	host.add_child(group)
+	var gbutton := Button.new()
+	group.add_child(gbutton)
+	Graphic.update(gbutton, {"color": Color.WHITE})
+	gbutton.set_meta(Selectable.META, {"target": NodePath("."), "colors": {"normalColor": Color(1, 1, 1, 1), "disabledColor": Color(0.5, 0.5, 0.5, 0.5)}})
+	var ghelper := Node.new()
+	ghelper.name = Selectable.HELPER
+	ghelper.set_script(Selectable)
+	gbutton.add_child(ghelper)
+	eq(Graphic.renderer_color(gbutton), Color(1, 1, 1, 1), "a button below a group that allows interaction: normal colour")
+	UiGroup.update(group, {"interactable": false, "alpha": 0.5})
+	ok(not Selectable.interactable(gbutton) and not gbutton.disabled, "a group that is not interactable stops the button (its own flag stays)")
+	eq(Graphic.renderer_color(gbutton), Color(0.5, 0.5, 0.5, 0.5), "... which shows its disabled colour at once")
+	eq(group.mouse_behavior_recursive, Control.MOUSE_BEHAVIOR_DISABLED, "... and takes no pointer input, nor does anything below")
+	near(group.modulate.a, 0.5, "the group's alpha fades everything below")
+	var inner_group := Control.new()
+	group.add_child(inner_group)
+	var ibutton := Button.new()
+	inner_group.add_child(ibutton)
+	UiGroup.update(inner_group, {"ignoreParentGroups": true})
+	ok(Selectable.interactable(ibutton), "a group that ignores its parents starts over")
+	eq(inner_group.mouse_behavior_recursive, Control.MOUSE_BEHAVIOR_ENABLED, "... for the pointer too")
+	UiGroup.update(group, {"interactable": true})
+	eq(Graphic.renderer_color(gbutton), Color(1, 1, 1, 1), "interactable again: normal colour")
+	eq(group.mouse_behavior_recursive, Control.MOUSE_BEHAVIOR_INHERITED, "... and input as before")
 	# colour multiplier
 	var cfg: Dictionary = toggle.get_meta(Selectable.META).duplicate(true)
 	cfg["colors"] = {"normalColor": Color(0.4, 0.4, 0.4, 1), "colorMultiplier": 2.0}
