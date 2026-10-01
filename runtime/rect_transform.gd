@@ -32,6 +32,8 @@ extends RefCounted
 const META_CANVAS := &"unidot_canvas"
 const META_RECT := &"unidot_rect"
 const META_VIEW := &"unidot_canvas_view"
+## The Unity values of a UI prefab's root, kept beside the Control (see `apply_prefab_rect`).
+const META_PREFAB_RECT := &"unidot_prefab_rect"
 ## Helper nodes that are not GameObjects of their own (viewport, plane, shape, inline view).
 const META_HELPER := &"unidot_helper"
 const GROUP_UI_SHAPE := &"unidot_ui_shape"
@@ -39,6 +41,8 @@ const GROUP_UI_SHAPE := &"unidot_ui_shape"
 ## Largest viewport edge; beyond it the pixel density drops so quad, viewport and root scale keep
 ## describing the same canvas units.
 const MAX_VIEWPORT_PX := 8192.0
+## Frames the content of a canvas has to stay unchanged before its plane shrinks to fit it.
+const FIT_SETTLE_FRAMES := 8
 ## A rect tilted by more than this against its canvas plane (cosine of 0.5 degrees) leaves it.
 const TILT_COS := 0.99996
 
@@ -148,6 +152,15 @@ static func logical_children(n: Node) -> Array:
 	return out
 
 
+## Where the UI children of a GameObject node go: a canvas's root control, else the node itself.
+static func child_host(parent: Node) -> Node:
+	if parent != null and parent.has_meta(META_CANVAS):
+		var r: Control = root_control(parent)
+		if r != null:
+			return r
+	return parent
+
+
 ## The world island whose viewport draws `n` (for a holder: the island its parent control is in).
 static func island_of(n: Node) -> Node:
 	var cur: Node = store(n).get_parent() if n != null else null
@@ -185,6 +198,8 @@ static func _overlay_of(n: Node) -> Node:
 ## Pivot of a Control as a Unity fraction (y up). `pivot_offset` in pixels is honoured for
 ## hand-built controls; `set_values` writes the ratio form, which follows size changes.
 static func _control_pivot(c: Control) -> Vector2:
+	if not _prefab_rect(c).is_empty():
+		return _prefab_rect(c).get("pivot", Vector2(0.5, 0.5))
 	var r: Vector2 = c.pivot_offset_ratio
 	if c.pivot_offset != Vector2.ZERO:
 		var size: Vector2 = _control_rect(c).size
@@ -198,6 +213,9 @@ static func _control_pivot(c: Control) -> Vector2:
 ## Position and size of a Control in its parent, Godot coordinates. Controls outside the tree
 ## (a scene being built) are not laid out, so the rectangle is computed from anchors and offsets.
 static func _control_rect(c: Control) -> Rect2:
+	if not _prefab_rect(c).is_empty():
+		var sd: Vector2 = _prefab_rect(c).get("size_delta", Vector2.ZERO)
+		return Rect2(Vector2.ZERO, Vector2(maxf(sd.x, 0.0), maxf(sd.y, 0.0)))
 	if c.is_inside_tree():
 		return Rect2(c.position, c.size)
 	var ps: Vector2 = _godot_size(c.get_parent())
@@ -212,6 +230,8 @@ static func _godot_size(n: Node) -> Vector2:
 	if not (n is Control):
 		return Vector2.ZERO
 	var c: Control = n
+	if not _prefab_rect(c).is_empty():
+		return _control_rect(c).size
 	if c.is_inside_tree() or holder_of(c) != null:
 		return c.size   # a root control's size is set explicitly
 	return _control_rect(c).size
@@ -222,6 +242,10 @@ static func _godot_size(n: Node) -> Vector2:
 ##   z (localPosition.z), rotation (Quaternion, localRotation), scale (Vector3, localScale)
 static func values(n: Node) -> Dictionary:
 	var s: Node = store(n)
+	if not _prefab_rect(s).is_empty():
+		var pv0: Dictionary = _defaults()
+		pv0.merge(_prefab_rect(s), true)
+		return pv0
 	if s is Control:
 		var c: Control = s
 		var pv: Vector2 = _control_pivot(c)
@@ -307,8 +331,33 @@ static func control_properties(v: Dictionary) -> Dictionary:
 		"offset_top": -(ap.y + (1.0 - pv.y) * sd.y), "offset_bottom": -(ap.y - pv.y * sd.y),
 		"pivot_offset": Vector2.ZERO, "pivot_offset_ratio": Vector2(pv.x, 1.0 - pv.y),
 		"rotation": rs[0], "scale": rs[1],
-		"metadata/" + String(META_RECT): extra,
+		"metadata/" + String(META_RECT): extra if not extra.is_empty() else null,
 	}
+
+
+## The root of a UI prefab has no rect of its own until it is instanced: Unity records the
+## root's anchors, position and size on every instance. Its Control keeps Godot's defaults and
+## the Unity values wait in metadata, because of how Godot stores instanced Controls: a Control
+## saved outside the tree gets `layout_mode = 0`, loading that resets anchors and offsets to the
+## top-left preset, and an instance only stores the values that differ from its base scene. With
+## a default base the reset and the base agree, so every instance loads exactly what was set.
+## Instancing code calls this to give the root its values (overrides then go on top).
+static func apply_prefab_rect(n: Node) -> void:
+	var v: Dictionary = _prefab_rect(n)
+	if v.is_empty():
+		return
+	# emptied, not removed: an instance cannot store that its base's metadata is gone
+	n.set_meta(META_PREFAB_RECT, {})
+	set_values(n, v)
+
+
+## The Unity values a prefab root is still waiting to be given, or {}.
+static func _prefab_rect(n: Node) -> Dictionary:
+	if n is Control and n.has_meta(META_PREFAB_RECT):
+		var v = n.get_meta(META_PREFAB_RECT)
+		if v is Dictionary and not v.is_empty():
+			return v
+	return {}
 
 
 ## Write Unity values to a rect. `v` may hold any subset of the keys `values` returns.
@@ -318,6 +367,9 @@ static func set_values(n: Node, v: Dictionary) -> void:
 		return
 	var full: Dictionary = values(s)
 	full.merge(v, true)
+	if not _prefab_rect(s).is_empty():
+		s.set_meta(META_PREFAB_RECT, full)
+		return
 	if s is Control:
 		var c: Control = s
 		var p: Dictionary = control_properties(full)
@@ -334,8 +386,8 @@ static func set_values(n: Node, v: Dictionary) -> void:
 		c.pivot_offset_ratio = p["pivot_offset_ratio"]
 		c.rotation = p["rotation"]
 		c.scale = p["scale"]
-		var extra: Dictionary = p["metadata/" + String(META_RECT)]
-		if extra.is_empty():
+		var extra = p["metadata/" + String(META_RECT)]
+		if extra == null:
 			if c.has_meta(META_RECT):
 				c.remove_meta(META_RECT)
 		else:
@@ -365,11 +417,17 @@ static func _safe_scale(s: Vector3) -> Vector3:
 	return Vector3(s.x if absf(s.x) > 1e-7 else 1e-7, s.y if absf(s.y) > 1e-7 else 1e-7, s.z if absf(s.z) > 1e-7 else 1e-7)
 
 
+## The canvas config, safe to change: instances of a canvas prefab share the dictionary their
+## scene was loaded with, and one instance's fit must not become the other's.
+static func _own_cfg(holder: Node) -> Dictionary:
+	return (holder.get_meta(META_CANVAS) as Dictionary).duplicate()
+
+
 ## Keep a canvas's root control and config in step with its rect.
 static func _island_resized(holder: Node) -> void:
 	if not holder.has_meta(META_CANVAS):
 		return
-	var cfg: Dictionary = holder.get_meta(META_CANVAS)
+	var cfg: Dictionary = _own_cfg(holder)
 	if str(cfg.get("mode", "")) != "world":
 		return
 	var size: Vector2 = rect_size(holder)
@@ -684,9 +742,36 @@ static func is_planar(z: float, q: Quaternion, depth_scale: float) -> bool:
 	return absf(zaxis.z) >= TILT_COS
 
 
-## After a setter: a Control that no longer lies in the plane of its canvas becomes an island.
+static var _pending: Array = []
+static var _flush_queued: bool = false
+
+## After a setter: a Control that no longer lies in the plane of its canvas becomes a canvas of
+## its own. Decided at the end of the frame, not here: scripts pass through states that are not
+## meant to last (SetParent keeping the world position, then localPosition = 0, localRotation =
+## identity, localScale = 1 is how every list entry is instantiated).
 static func _left_plane(s: Node) -> void:
-	if not (s is Control) or not s.is_inside_tree():
+	if not (s is Control) or holder_of(s) != null:
+		return
+	if not _pending.has(s):
+		_pending.append(s)
+	if not _flush_queued:
+		_flush_queued = true
+		flush_promotions.call_deferred()
+
+
+## Promote the controls whose setters left them outside their canvas plane (runs deferred; call
+## it to have the canvases built right away).
+static func flush_promotions() -> void:
+	_flush_queued = false
+	var list: Array = _pending
+	_pending = []
+	for c in list:
+		if is_instance_valid(c) and c is Control:
+			_promote_if_out(c)
+
+
+static func _promote_if_out(s: Control) -> void:
+	if not s.is_inside_tree() or holder_of(s) != null:
 		return
 	if island_of(s) == null:
 		return   # screen space: drawn flat whatever its transform is
@@ -743,6 +828,8 @@ static func build_island(holder: Node3D, root: Control, rect_values: Dictionary,
 	area.name = "UiShape"
 	var shape := CollisionShape3D.new()
 	shape.shape = BoxShape3D.new()
+	# (instances of a canvas prefab are fitted one by one: they must not share these resources)
+	shape.shape.resource_local_to_scene = true
 	area.add_child(shape, true)
 	area.set_meta(META_HELPER, true)
 	holder.add_child(area, true)
@@ -750,10 +837,12 @@ static func build_island(holder: Node3D, root: Control, rect_values: Dictionary,
 	var plane := MeshInstance3D.new()
 	plane.name = "CanvasPlane"
 	plane.mesh = QuadMesh.new()
+	plane.mesh.resource_local_to_scene = true
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.resource_local_to_scene = true
 	plane.material_override = mat
 	plane.set_meta(META_HELPER, true)
 	holder.set_meta(META_CANVAS, {
@@ -799,6 +888,23 @@ static func promote(c: Control) -> Node3D:
 	return holder
 
 
+## At start: controls whose imported transform lies outside the plane of their canvas (a tilted
+## menu, a label pushed along z) get a canvas of their own. The importer keeps them as controls.
+static func promote_out_of_plane(holder: Node) -> void:
+	var root: Control = root_control(holder)
+	if root == null:
+		return
+	var stack: Array = root.get_children()
+	while not stack.is_empty():
+		var n = stack.pop_back()
+		if not (n is Control):
+			continue   # a nested canvas looks after its own controls
+		if n.has_meta(META_RECT):
+			_promote_if_out(n)
+		if holder_of(n) == null:
+			stack.append_array(n.get_children())
+
+
 ## Does the control draw anything? RectTransforms without a Graphic become plain Controls (menus,
 ## anchors, layout groups) whose rects are layout helpers, often far larger than what they hold,
 ## and must not size the plane.
@@ -835,11 +941,13 @@ static func content_bounds(c: Control, to_root: Transform2D, out: Array) -> void
 				out.append(clipped)
 
 
+static var _fit_seen: Dictionary = {}   # holder instance id → [content rect, frames it stayed the same]
+
 ## Size the viewport and the plane to what the canvas draws (Unity world canvases do not clip:
 ## children may lie far outside the canvas rect) and keep the canvas's world placement.
 ## → true when the canvas draws something.
 static func fit_island(holder: Node) -> bool:
-	var cfg: Dictionary = holder.get_meta(META_CANVAS)
+	var cfg: Dictionary = _own_cfg(holder)
 	var root: Control = root_control(holder)
 	var vp: SubViewport = holder.get_node_or_null(cfg.get("viewport", NodePath())) as SubViewport
 	var plane: MeshInstance3D = holder.get_node_or_null(cfg.get("plane", NodePath())) as MeshInstance3D
@@ -874,12 +982,18 @@ static func fit_island(holder: Node) -> bool:
 		k = MAX_VIEWPORT_PX / union.size.y
 	k = maxf(k, 1e-4)
 	var pv: Vector2 = cfg.get("pivot", Vector2(0.5, 0.5))
-	# keep the current fit while the content stays inside it and has not shrunk much (content
-	# that moves every frame would otherwise resize the viewport every frame)
+	# Content that moves every frame must not resize the viewport every frame: the fit grows at
+	# once when something leaves it, and shrinks back when the content has been still for a while.
 	var cur := Rect2(cfg.get("offset", Vector2.ZERO), cfg.get("plane_size", Vector2.ZERO))
+	var id: int = holder.get_instance_id()
+	var still: int = 0
+	if _fit_seen.has(id) and _fit_seen[id][0] == union:
+		still = int(_fit_seen[id][1]) + 1
+	_fit_seen[id] = [union, still]
 	if is_equal_approx(k, float(cfg.get("k", 0.0))) and cfg.get("fit_size") == rsize and cfg.get("fit_pivot") == pv:
 		var slack: Vector2 = Vector2.ONE * (1.5 / k)
-		if cur.grow(0.001 / k).encloses(union) and cur.size.x <= union.size.x * 1.25 + slack.x and cur.size.y <= union.size.y * 1.25 + slack.y:
+		var snug: bool = cur.size.x <= union.size.x + slack.x and cur.size.y <= union.size.y + slack.y
+		if cur.grow(0.001 / k).encloses(union) and (snug or still < FIT_SETTLE_FRAMES):
 			return true
 	# whole pixels, so the texture maps 1:1 and controls keep their sub-pixel placement
 	var origin: Vector2 = (union.position * k).floor() / k
@@ -940,13 +1054,13 @@ static func island_depth(holder: Node) -> int:
 ## anchors, the pixel density follows the world scale, the plane fits the content, and a canvas
 ## nested in another one is put where its Unity values say.
 static func sync_island(holder: Node) -> void:
-	var cfg: Dictionary = holder.get_meta(META_CANVAS)
+	var cfg: Dictionary = _own_cfg(holder)
 	var root: Control = root_control(holder)
 	var plane: MeshInstance3D = holder.get_node_or_null(cfg.get("plane", NodePath())) as MeshInstance3D
 	if root == null or plane == null:
 		return
 	_island_resized(holder)
-	cfg = holder.get_meta(META_CANVAS)
+	cfg = _own_cfg(holder)
 	var nested: bool = is_nested(holder)
 	var wm: Transform3D = world_matrix(holder)
 	var density: float = maxf(pixels_per_metre() * maxf(wm.basis.x.length(), 1e-6), 0.01)
@@ -954,7 +1068,7 @@ static func sync_island(holder: Node) -> void:
 		cfg["density"] = density
 		holder.set_meta(META_CANVAS, cfg)
 	var has_content: bool = fit_island(holder)
-	cfg = holder.get_meta(META_CANVAS)
+	cfg = _own_cfg(holder)
 	var shown: bool = has_content and island_shown(holder) and not _singular(wm.basis)
 	var inline: bool = false
 	if nested and not _singular(wm.basis):
@@ -963,6 +1077,9 @@ static func sync_island(holder: Node) -> void:
 			inline = true
 		else:
 			(holder as Node3D).global_transform = godot_from_unity(wm)
+	if bool(cfg.get("inline", false)) != inline:
+		cfg["inline"] = inline
+		holder.set_meta(META_CANVAS, cfg)
 	var view: TextureRect = _inline_view(holder, inline and shown)
 	if view != null:
 		view.visible = inline and shown
@@ -987,6 +1104,31 @@ static func _coplanar(wm: Transform3D, outer: Transform3D) -> bool:
 	if absf(zaxis.normalized().z) < TILT_COS:
 		return false
 	return absf(rel.origin.z) * outer.basis.z.length() <= flatten_depth()
+
+
+## Where a point of a control (its own Godot coordinates) is drawn: followed through what is
+## rendered — the control's viewport pixel, then the quad showing that viewport, or the inline
+## view in the canvas around it. Unity world space (x mirrored back); window pixels with y up for
+## a screen-space canvas. Independent of `world_matrix`, which says where it should be.
+static func drawn_point(c: Control, local: Vector2) -> Vector3:
+	var px: Vector2 = c.get_global_transform() * local
+	var vp: Viewport = c.get_viewport()
+	if not (vp is SubViewport) or not is_island(vp.get_parent()):
+		var h: float = vp.get_visible_rect().size.y if vp != null else 0.0
+		return Vector3(px.x, h - px.y, 0.0)
+	var holder: Node = vp.get_parent()
+	var cfg: Dictionary = holder.get_meta(META_CANVAS)
+	var uv: Vector2 = px / Vector2((vp as SubViewport).size)
+	if bool(cfg.get("inline", false)):
+		for v in holder.get_parent().get_children():
+			if v.has_meta(META_VIEW) and v.get_meta(META_VIEW) == holder.get_instance_id():
+				return drawn_point(v, uv * (v as Control).size)
+	var plane: MeshInstance3D = holder.get_node_or_null(cfg.get("plane", NodePath())) as MeshInstance3D
+	if plane == null or not (plane.mesh is QuadMesh):
+		return Vector3(INF, INF, INF)
+	var s: Vector2 = (plane.mesh as QuadMesh).size
+	var g: Vector3 = plane.global_transform * Vector3((uv.x - 0.5) * s.x, (0.5 - uv.y) * s.y, 0.0)
+	return Vector3(-g.x, g.y, g.z)
 
 
 ## The TextureRect that shows a nested canvas inside the canvas around it.
@@ -1049,14 +1191,3 @@ static func _place_view(holder: Node, view: TextureRect, cfg: Dictionary) -> voi
 	view.scale = rs[1]
 	if view.get_index() != holder.get_index() + 1:
 		host.move_child(view, mini(holder.get_index() + 1, host.get_child_count() - 1))
-
-
-## Decide at import whether a RectTransform needs a canvas of its own: `parent` is the node its
-## GameObject is built under, `v` its Unity values, `depth_scale` the world scale along z of the
-## parent (within the file being imported).
-static func needs_island(parent: Node, v: Dictionary, depth_scale: float) -> bool:
-	if not (parent is Control):
-		return false
-	if _overlay_of(parent) != null:
-		return false
-	return not is_planar(float(v.get("z", 0.0)), v.get("rotation", Quaternion.IDENTITY), depth_scale)

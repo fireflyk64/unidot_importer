@@ -34,7 +34,9 @@ func _ready() -> void:
 	# a canvas under a disabled node still has to be hidden and placed
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	set_process(true)
-	RT.sync_island(holder)
+	RT.promote_out_of_plane(holder)
+	# (the first sync waits for _process: a nested canvas may add its inline view to the control
+	# it hangs under, which is still setting up its children here)
 
 
 func _process(_delta: float) -> void:

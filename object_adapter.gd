@@ -24,6 +24,8 @@ const human_trait = preload("./humanoid/human_trait.gd")
 const humanoid_transform_util = preload("./humanoid/transform_util.gd")
 const unidot_utils_class = preload("./unidot_utils.gd")
 const shaderlab := preload("./shaderlab.gd")
+const rect_transform := preload("./runtime/rect_transform.gd")
+const ui_integration := preload("./ui_integration.gd")
 
 var unidot_utils = unidot_utils_class.new()
 
@@ -4283,17 +4285,9 @@ class UnidotGameObject:
 					smrs.append(smr)
 
 		var prefab_name_map = name_map.duplicate()
-		# Plugins may redirect child GameObjects under another node (e.g. a Canvas viewport).
-		var children_parent: Node = ret
-		for plugin in meta.get_enabled_plugins():
-			if plugin.has_method("children_parent"):
-				var cp: Node = plugin.children_parent(self, state, ret)
-				if cp != null:
-					children_parent = cp
-					break
 		for child_ref in transform.children_refs:
 			var child_transform: UnidotTransform = meta.lookup(child_ref)
-			var prefab_data: Array = recurse_to_child_transform(state, child_transform, children_parent)
+			var prefab_data: Array = recurse_to_child_transform(state, child_transform, ret)
 			if len(prefab_data) == 4:
 				name_map[prefab_data[1]] = prefab_data[2]
 				prefab_name_map[prefab_data[1]] = prefab_data[2]
@@ -4521,6 +4515,11 @@ class UnidotPrefabInstance:
 		else:
 			# Traditional instanced scene case: It only requires calling instantiate() and setting the filename.
 			instanced_scene = packed_scene.instantiate(PackedScene.GEN_EDIT_STATE_INSTANCE)
+			if rect_transform.is_ui(instanced_scene):
+				# a UI prefab under a canvas GameObject lives with the canvas's other controls
+				new_parent = rect_transform.child_host(new_parent)
+				# the root of a UI prefab gets its rect here; the instance's overrides go on top
+				rect_transform.apply_prefab_rect(instanced_scene)
 			instanced_scene.name = StringName(toplevel_rename)
 			#instanced_scene.scene_file_path = packed_scene.resource_path
 			state.add_child(instanced_scene, new_parent, self)
@@ -5239,7 +5238,17 @@ class UnidotRectTransform:
 	func get_godot_type() -> String:
 		return "Control"
 
-	pass
+	## Prefab-instance overrides of anchors, anchored position, size delta, pivot, rotation and
+	## scale: on a Control or a canvas they go through the same code as the import itself.
+	func convert_properties(node: Node, uprops: Dictionary) -> Dictionary:
+		if rect_transform.is_ui(node):
+			return ui_integration.rect_override_properties(node, uprops)
+		return super.convert_properties(node, uprops)
+
+	# (the Transform version records scale signs of Node3D scales)
+	func apply_component_props(node: Node, props: Dictionary):
+		if not rect_transform.is_ui(node):
+			super.apply_component_props(node, props)
 
 
 class UnidotCollider:
@@ -6904,8 +6913,8 @@ class UnidotTerrain:
 		return outdict
 
 
-## Unity UI: the Canvas itself is handled by importer plugins (see children_parent hooks); the
-## CanvasRenderer carries no data of its own. Both create no node.
+## Unity UI: the Canvas is built with its GameObject (ui_integration.gd); the CanvasRenderer
+## carries no data of its own. Both create no node.
 class UnidotCanvas:
 	extends UnidotBehaviour
 
@@ -6928,20 +6937,13 @@ class UnidotCanvasGroup:
 	# Applies to the GameObject's Control: alpha → modulate, interactable/blocksRaycasts → mouse filter.
 
 	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
-		var target: Node = new_parent
-		if new_parent != null and new_parent.has_meta("udon_canvas"):
-			# world-space canvas: the GameObject is a container, its UI root is a Control
-			var cfg: Dictionary = new_parent.get_meta("udon_canvas")
-			var root: Node = new_parent.get_node_or_null(cfg.get("root", NodePath()))
-			if root != null:
-				target = root
+		var target: Node = ui_integration.control_of(new_parent)
 		if target is CanvasItem:
 			target.modulate.a = clampf(float(keys.get("m_Alpha", 1.0)), 0.0, 1.0)
 		if target is Control:
 			var interactable: bool = keys.get("m_Interactable", 1) != 0 and keys.get("m_BlocksRaycasts", 1) != 0
 			target.mouse_filter = Control.MOUSE_FILTER_STOP if interactable else Control.MOUSE_FILTER_IGNORE
-		if target != null:
-			target.set_meta("udon_canvas_group", {"alpha": float(keys.get("m_Alpha", 1.0)), "interactable": keys.get("m_Interactable", 1) != 0, "blocksRaycasts": keys.get("m_BlocksRaycasts", 1) != 0, "ignoreParentGroups": keys.get("m_IgnoreParentGroups", 0) != 0})
+			target.set_meta("unidot_canvas_group", {"alpha": float(keys.get("m_Alpha", 1.0)), "interactable": keys.get("m_Interactable", 1) != 0, "blocksRaycasts": keys.get("m_BlocksRaycasts", 1) != 0, "ignoreParentGroups": keys.get("m_IgnoreParentGroups", 0) != 0})
 		return null
 
 

@@ -7,6 +7,7 @@ extends Resource
 const asset_meta_class := preload("./asset_meta.gd")
 const object_adapter_class := preload("./object_adapter.gd")
 const vrm_integration_class := preload("./vrm_integration.gd")
+const ui_integration_class := preload("./ui_integration.gd")
 
 const ASSET_DATABASE_PATH: String = "res://unidot_asset_database.res"
 
@@ -26,8 +27,11 @@ var log_message_holder = asset_meta_class.LogMessageHolder.new()
 @export var enable_verbose_logs: bool = false
 @export var set_animation_trees_active: bool = true
 @export var vrm_spring_bones: bool = true
+## Convert Unity UI (Canvas, RectTransform, uGUI and TextMeshPro components) to Controls.
+@export var convert_ui: bool = true
 @export var convert_fbx_to_gltf: bool = false
 var vrm_integration_plugin
+var ui_integration_plugin
 var log_limit_per_guid: int = 100000
 
 @export var global_log_count: int = 0
@@ -126,6 +130,11 @@ var _extra_plugins_loaded: bool = false
 
 func get_enabled_plugins() -> Array[RefCounted]:
 	var out: Array[RefCounted] = []
+	if convert_ui:
+		if ui_integration_plugin == null:
+			ui_integration_plugin = ui_integration_class.new()
+			ui_integration_plugin.set_database(self)
+		out.append(ui_integration_plugin)
 	if vrm_spring_bones:
 		if vrm_integration_plugin == null:
 			vrm_integration_plugin = vrm_integration_class.new()

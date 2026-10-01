@@ -233,22 +233,8 @@ func _image(parent: Control, name: String, v: Dictionary) -> TextureRect:
 	return t
 
 
-## Where a point of a control is drawn in the world, following what is rendered: control →
-## viewport pixel → the quad showing that viewport (or the inline view in the canvas around it).
 func rendered(c: Control, local: Vector2) -> Vector3:
-	var px: Vector2 = c.get_global_transform() * local
-	var vp: SubViewport = c.get_viewport() as SubViewport
-	var holder: Node = vp.get_parent()
-	var plane: MeshInstance3D = holder.get_node("CanvasPlane")
-	if plane.visible:
-		var s: Vector2 = (plane.mesh as QuadMesh).size
-		var uv: Vector2 = px / Vector2(vp.size)
-		var g: Vector3 = plane.global_transform * Vector3((uv.x - 0.5) * s.x, (0.5 - uv.y) * s.y, 0.0)
-		return Vector3(-g.x, g.y, g.z)   # Unity world space
-	for v in holder.get_parent().get_children():
-		if v.has_meta(RT.META_VIEW) and v.get_meta(RT.META_VIEW) == holder.get_instance_id():
-			return rendered(v, px / Vector2(vp.size) * v.size)
-	return Vector3(INF, INF, INF)
+	return RT.drawn_point(c, local)
 
 
 func _world_canvas() -> void:
@@ -272,6 +258,16 @@ func _world_canvas() -> void:
 	near(float(cfg["k"]), 1024.0 * 0.01, "pixel density follows the world scale")
 	ok(RT.logical_parent(img) == holder, "a child's parent is the canvas, not its viewport")
 	ok(RT.logical_children(holder) == [img, far], "the canvas's children are its controls")
+	# the plane grows at once and shrinks back when the content has been still for a few frames
+	RT.set_anchored_position(far, Vector2(0, 0))
+	for _f in range(RT.FIT_SETTLE_FRAMES + 3):
+		await process_frame
+	cfg = holder.get_meta(RT.META_CANVAS)
+	ok(absf(cfg["plane_size"].x - 80.0) < 0.2 and absf(cfg["plane_size"].y - 45.0) < 0.2, "the plane shrinks to the content once it is still: " + str(cfg["plane_size"]))
+	RT.set_anchored_position(far, Vector2(300, -200))
+	await process_frame
+	await process_frame
+	near(rendered(far, Vector2(10, 10)), Vector3(-1 + 3.0, 2 - 2.0, 3), "... and grows at once when content leaves it", 2e-3)
 	# world position setter inside the plane: stays a control
 	RT.set_world_position(img, Vector3(-1, 2, 3))
 	near(RT.anchored_position(img), Vector2(0, 0), "world position setter moves the anchored position")
@@ -301,6 +297,9 @@ func _promotion() -> void:
 	# tilt the panel 45 degrees about x: it leaves the canvas plane and gets a canvas of its own
 	var tilt := Quaternion(Vector3(1, 0, 0), PI / 4.0)
 	RT.set_local_rotation(panel, tilt)
+	ok(RT.holder_of(panel) == null, "the canvas is not built inside the setter (the state may not last)")
+	near(RT.world_position(img), Vector3(0.2, 1, 0), "world positions are right before the canvas exists")
+	await process_frame
 	var island: Node = RT.holder_of(panel)
 	ok(island != null and RT.is_island(island), "a tilted control becomes a canvas of its own")
 	ok(RT.identity(island) == panel, "... and is still known by the control")
@@ -334,10 +333,24 @@ func _promotion() -> void:
 	_rt(other, {"size_delta": Vector2(10, 10)})
 	_image(other, "Dot", {"size_delta": Vector2(10, 10)})
 	RT.set_local_position(other, Vector3(0, 0, 0.05))   # 0.05 units * 0.01 = 0.5 mm: still flat
+	RT.flush_promotions()
 	ok(RT.holder_of(other) == null, "half a millimetre off the plane stays in the canvas")
 	RT.set_local_position(other, Vector3(0, 0, 50))     # 0.5 m
+	RT.flush_promotions()
 	ok(RT.holder_of(other) != null, "half a metre off the plane becomes a canvas of its own")
 	await process_frame
+	# a state that does not last: out of the plane and back within one frame (SetParent keeping
+	# the world position, then the local values are reset, as list entries are instantiated)
+	var entry := Control.new()
+	entry.name = "Entry"
+	croot.add_child(entry)
+	_rt(entry, {"size_delta": Vector2(10, 10)})
+	RT.set_local_rotation(entry, Quaternion(Vector3(1, 0, 0), 1.0))
+	RT.set_local_position(entry, Vector3(5, 5, 300))
+	RT.set_local_rotation(entry, Quaternion.IDENTITY)
+	RT.set_local_position(entry, Vector3(5, 5, 0))
+	await process_frame
+	ok(RT.holder_of(entry) == null and entry.get_parent() == croot, "a control that is back in the plane by the end of the frame stays a control")
 	near(RT.world_position(other), Vector3(0, 1, 0.5), "its world position carries the z offset")
 	# hiding the control hides its plane; freeing it removes the holder
 	panel.visible = false
@@ -410,6 +423,7 @@ func _screen_canvas() -> void:
 	# bottom-right corner, 10 canvas units in: Unity world units of a screen canvas are pixels, y up
 	near(RT.world_position(img), Vector3(screen.x - 10 * f, 10 * f, 0), "screen canvas world position is in pixels, y up", 0.01)
 	RT.set_local_rotation(img, Quaternion(Vector3(1, 0, 0), 1.0))
+	RT.flush_promotions()
 	ok(RT.holder_of(img) == null, "a tilted control on a screen canvas stays flat")
 	canvas.queue_free()
 	await process_frame

@@ -10,7 +10,15 @@ const RT := preload("./rect_transform.gd")
 
 func _ready() -> void:
 	get_viewport().size_changed.connect(apply)
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	apply()
+
+
+## A CanvasLayer does not inherit the visibility of the Node3D it hangs under.
+func _process(_delta: float) -> void:
+	var canvas: Node3D = get_parent() as Node3D
+	if canvas != null and visible != canvas.is_visible_in_tree():
+		visible = canvas.is_visible_in_tree()
 
 
 ## Unity's CanvasScaler: the factor between canvas units and screen pixels.
@@ -40,7 +48,7 @@ func apply() -> void:
 	var canvas: Node = get_parent()
 	if canvas == null or not canvas.has_meta(RT.META_CANVAS):
 		return
-	var cfg: Dictionary = canvas.get_meta(RT.META_CANVAS)
+	var cfg: Dictionary = (canvas.get_meta(RT.META_CANVAS) as Dictionary).duplicate()   # instances share it
 	var root: Control = RT.root_control(canvas)
 	if root == null:
 		return
