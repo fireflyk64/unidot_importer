@@ -935,6 +935,71 @@ func _identify_component(guid: String, keys: Dictionary, file_id: int = 0) -> St
 	return ""
 
 
+## Unity's Animations constraints (hook of object_adapter's constraint classes). udon_runtime
+## solves them (U.solve_constraints, the store scripts reach through PositionConstraint ...); the
+## settings go to the node's `udon_constraint` metadata under the names of the script API:
+##   {list: [{kind, active, weight, locked, weights: [one per source], translationOffset, ...}],
+##    "src_<constraint>_<source>": NodePath of each source transform,
+##    "up_<constraint>": NodePath of an aim / look-at constraint's world up object}
+## Values are Unity's (the run time works in Unity's coordinates).
+func handle_constraint(kind: String, obj: RefCounted, _state: RefCounted, node: Node) -> void:
+	if node == null or kind == "":
+		return
+	var keys: Dictionary = obj.keys
+	var meta_key: String = "udon_constraint"
+	var cfg: Dictionary = (node.get_meta(meta_key) as Dictionary).duplicate(true) if node.has_meta(meta_key) else {"list": []}
+	var list: Array = cfg["list"]
+	var index: int = list.size()
+	var c: Dictionary = {
+		"kind": kind,
+		# (Unity 2022 writes m_Active, later versions m_IsContraintActive)
+		"active": _to_int(keys.get("m_Active", keys.get("m_IsContraintActive", 0))) != 0 and _to_int(keys.get("m_Enabled", 1)) != 0,
+		"weight": _to_float(keys.get("m_Weight", 1.0)),
+		"locked": _to_int(keys.get("m_IsLocked", 0)) != 0,
+	}
+	for pair in [["m_TranslationAtRest", "translationAtRest"], ["m_TranslationOffset", "translationOffset"], ["m_RotationAtRest", "rotationAtRest"],
+			["m_RotationOffset", "rotationOffset"], ["m_ScaleAtRest", "scaleAtRest"], ["m_ScaleOffset", "scaleOffset"], ["m_AimVector", "aimVector"],
+			["m_UpVector", "upVector"], ["m_WorldUpVector", "worldUpVector"]]:
+		if keys.get(pair[0]) is Vector3:
+			c[pair[1]] = keys[pair[0]]
+	for pair in [["m_TranslationOffsets", "translationOffsets"], ["m_RotationOffsets", "rotationOffsets"]]:
+		if keys.get(pair[0]) is Array:
+			c[pair[1]] = (keys[pair[0]] as Array).filter(func(v) -> bool: return v is Vector3)
+	# Axis flags: x 1, y 2, z 4
+	for pair in [["m_AffectTranslation", "translationAxis"], ["m_AffectRotation", "rotationAxis"], ["m_AffectScaling", "scalingAxis"]]:
+		if keys.has(pair[0] + "X"):
+			c[pair[1]] = (1 if _to_int(keys.get(pair[0] + "X", 1)) != 0 else 0) | (2 if _to_int(keys.get(pair[0] + "Y", 1)) != 0 else 0) | (4 if _to_int(keys.get(pair[0] + "Z", 1)) != 0 else 0)
+	if keys.has("m_UpType"):
+		c["worldUpType"] = _to_int(keys["m_UpType"])
+	if keys.has("m_Roll"):
+		c["roll"] = _to_float(keys["m_Roll"])
+	if keys.has("m_UseUpObject"):
+		c["useUpObject"] = _to_int(keys["m_UseUpObject"]) != 0
+	var weights: Array = []
+	var pending: Array = []
+	if keys.get("m_Sources") is Array:
+		for src in keys["m_Sources"]:
+			if not (src is Dictionary):
+				continue
+			pending.append(["src_%d_%d" % [index, weights.size()], src.get("sourceTransform")])
+			weights.append(_to_float(src.get("weight", 1.0)))
+	c["weights"] = weights
+	if keys.has("m_WorldUpObject"):
+		pending.append(["up_%d" % index, keys["m_WorldUpObject"]])
+	list.append(c)
+	node.set_meta(meta_key, cfg)
+	node.add_to_group(meta_key, true)
+	# the sources: known now, or patched into the metadata when the scene is complete
+	for entry in pending:
+		var np: NodePath = _nodepath_for_ref(entry[1], obj, node, meta_key, entry[0])
+		if np != NodePath():
+			var now: Dictionary = (node.get_meta(meta_key) as Dictionary).duplicate(true)
+			now[entry[0]] = np
+			node.set_meta(meta_key, now)
+	var counts: Dictionary = _report["components"]
+	counts["Constraint (" + kind + ")"] = int(counts.get("Constraint (" + kind + ")", 0)) + 1
+
+
 func _component_meta_key(kind: String) -> String:
 	match kind:
 		"VRC_Pickup":

@@ -6963,6 +6963,72 @@ class UnidotCanvasGroup:
 		return {}
 
 
+class UnidotConstraint:
+	extends UnidotBehaviour
+	# Unity's Animations constraints (Position, Rotation, Scale, Parent, Aim, LookAt). Godot has
+	# no node that does this for arbitrary nodes; a plugin that solves them at run time takes the
+	# settings through its optional hook
+	#   handle_constraint(kind: String, obj, state, node: Node) -> void
+	# (kind: "position", "rotation", "scale", "parent", "aim", "lookat").
+
+	func constraint_kind() -> String:
+		return ""
+
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
+		if new_parent != null:
+			state.add_fileID(new_parent, self)
+			for plugin in meta.get_enabled_plugins():
+				if plugin.has_method("handle_constraint"):
+					plugin.handle_constraint(constraint_kind(), self, state, new_parent)
+		return null
+
+	# (m_Enabled of the component is not the visibility of its GameObject)
+	func convert_properties(node: Node, uprops: Dictionary) -> Dictionary:
+		return {}
+
+
+class UnidotPositionConstraint:
+	extends UnidotConstraint
+
+	func constraint_kind() -> String:
+		return "position"
+
+
+class UnidotRotationConstraint:
+	extends UnidotConstraint
+
+	func constraint_kind() -> String:
+		return "rotation"
+
+
+class UnidotScaleConstraint:
+	extends UnidotConstraint
+
+	func constraint_kind() -> String:
+		return "scale"
+
+
+class UnidotParentConstraint:
+	extends UnidotConstraint
+
+	func constraint_kind() -> String:
+		return "parent"
+
+
+class UnidotAimConstraint:
+	extends UnidotConstraint
+
+	func constraint_kind() -> String:
+		return "aim"
+
+
+class UnidotLookAtConstraint:
+	extends UnidotConstraint
+
+	func constraint_kind() -> String:
+		return "lookat"
+
+
 class UnidotMonoBehaviour:
 	extends UnidotBehaviour
 	var monoscript: Array:
@@ -7684,7 +7750,7 @@ class DiscardUnidotComponent:
 
 
 var _type_dictionary: Dictionary = {
-	# "AimConstraint": UnidotAimConstraint,
+	"AimConstraint": UnidotAimConstraint,
 	# "AnchoredJoint2D": UnidotAnchoredJoint2D,
 	"Animation": UnidotAnimation,
 	"AnimationClip": UnidotAnimationClip,
@@ -7833,7 +7899,7 @@ var _type_dictionary: Dictionary = {
 	# "LocalizationAsset": UnidotLocalizationAsset,
 	# "LocalizationImporter": UnidotLocalizationImporter,
 	"LODGroup": UnidotLODGroup,
-	# "LookAtConstraint": UnidotLookAtConstraint,
+	"LookAtConstraint": UnidotLookAtConstraint,
 	# "LowerResBlitTexture": UnidotLowerResBlitTexture,
 	"Material": UnidotMaterial,
 	"Mesh": UnidotMesh,
@@ -7866,7 +7932,7 @@ var _type_dictionary: Dictionary = {
 	# "PackageManifest": UnidotPackageManifest,
 	# "PackageManifestImporter": UnidotPackageManifestImporter,
 	# "PackedAssets": UnidotPackedAssets,
-	# "ParentConstraint": UnidotParentConstraint,
+	"ParentConstraint": UnidotParentConstraint,
 	"ParticleSystem": UnidotParticleSystem,
 	# "ParticleSystemForceField": UnidotParticleSystemForceField,
 	"ParticleSystemRenderer": DiscardUnidotComponent,  # folded into UnidotParticleSystem
@@ -7884,7 +7950,7 @@ var _type_dictionary: Dictionary = {
 	# "PointEffector2D": UnidotPointEffector2D,
 	# "Polygon2D": UnidotPolygon2D,
 	# "PolygonCollider2D": UnidotPolygonCollider2D,
-	# "PositionConstraint": UnidotPositionConstraint,
+	"PositionConstraint": UnidotPositionConstraint,
 	"Prefab": UnidotPrefabLegacyUnused,
 	"PrefabImporter": UnidotPrefabImporter,
 	"PrefabInstance": UnidotPrefabInstance,
@@ -7907,11 +7973,11 @@ var _type_dictionary: Dictionary = {
 	"Rigidbody": UnidotRigidbody,
 	# "Rigidbody2D": UnidotRigidbody2D,
 	# "RootMotionData": UnidotRootMotionData,
-	# "RotationConstraint": UnidotRotationConstraint,
+	"RotationConstraint": UnidotRotationConstraint,
 	"RuntimeAnimatorController": UnidotRuntimeAnimatorController,
 	# "RuntimeInitializeOnLoadManager": UnidotRuntimeInitializeOnLoadManager,
 	# "SampleClip": UnidotSampleClip,
-	# "ScaleConstraint": UnidotScaleConstraint,
+	"ScaleConstraint": UnidotScaleConstraint,
 	# "SceneAsset": UnidotSceneAsset,
 	# "SceneVisibilityState": UnidotSceneVisibilityState,
 	# "ScriptedImporter": UnidotScriptedImporter,
