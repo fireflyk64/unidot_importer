@@ -77,6 +77,11 @@ static func _walk(n: Node, prefix: String, out: Array) -> void:
 	var model: Array = []
 	for w in RT.world_corners(n):
 		model.append([w.x, w.y, w.z])
+	# a plain Transform that holds UI draws nothing and has no size: there is no drawn place to
+	# follow, so its place is where its transforms say (it may be off the plane it is drawn in,
+	# and what is below it gets a canvas of its own where it has to)
+	if RT.carries(ctl) and RT.holder_of(ctl) == null:
+		corners = model.duplicate(true)
 	var id: Node = RT.identity(n)
 	var e: Dictionary = {
 		"path": path,

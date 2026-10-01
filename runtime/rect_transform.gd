@@ -36,6 +36,15 @@ const META_VIEW := &"unidot_canvas_view"
 const META_PREFAB_RECT := &"unidot_prefab_rect"
 ## Helper nodes that are not GameObjects of their own (viewport, plane, shape, inline view).
 const META_HELPER := &"unidot_helper"
+## A plain Transform inside a canvas that holds UI (the importer makes it a Control of no size).
+## It never turns or scales as a Control: it may be turned out of the canvas plane while what is
+## below it is turned back, and a Control can only show the planar projection of its own
+## rotation and scale. Its rotation and scale are handed down instead (META_CARRY: a Transform3D
+## whose basis is the rotation and scale of the holders down to this one and whose origin.z is
+## how far the holder is from the plane it is drawn in), and each rect below shows the
+## projection of the composed transform.
+const META_PLAIN := &"unidot_plain_transform"
+const META_CARRY := &"unidot_carry"
 const GROUP_UI_SHAPE := &"unidot_ui_shape"
 
 ## Largest viewport edge; beyond it the pixel density drops so quad, viewport and root scale keep
@@ -258,7 +267,7 @@ static func values(n: Node) -> Dictionary:
 		return {
 			"anchor_min": Vector2(c.anchor_left, 1.0 - c.anchor_bottom),
 			"anchor_max": Vector2(c.anchor_right, 1.0 - c.anchor_top),
-			"anchored_position": omin + pv * sd,
+			"anchored_position": extra.get("anchored_position", omin + pv * sd),
 			"size_delta": sd,
 			"pivot": pv,
 			"z": float(extra.get("z", 0.0)),
@@ -290,14 +299,31 @@ static func _defaults() -> Dictionary:
 ## Control rotation and scale that show the XY projection of a Unity rotation and scale.
 ## → [rotation (radians, Godot sense), scale (Vector2)]
 static func planar_rotation_scale(q: Quaternion, s: Vector3) -> Array:
-	var b := Basis(q.normalized())
-	var gx := Vector2(b.x.x * s.x, -b.x.y * s.x)     # image of Godot +x
-	var gy := Vector2(-b.y.x * s.y, b.y.y * s.y)     # image of Godot +y (Unity -y)
+	return planar_basis(Basis(q.normalized()) * Basis.from_scale(s))
+
+
+## ... of a Unity basis (rotation and scale, possibly composed of several).
+static func planar_basis(b: Basis) -> Array:
+	var gx := Vector2(b.x.x, -b.x.y)     # image of Godot +x
+	var gy := Vector2(-b.y.x, b.y.y)     # image of Godot +y (Unity -y)
 	var sx: float = gx.length()
 	if sx < 1e-12:
 		return [0.0, Vector2(0.0, gy.length())]
 	var det: float = gx.x * gy.y - gx.y * gy.x
 	return [atan2(gx.y, gx.x), Vector2(sx, det / sx)]
+
+
+## Does this control hand its rotation and scale down instead of showing them?
+static func carries(c: Node) -> bool:
+	return c is Control and c.has_meta(META_PLAIN)
+
+
+## What the plain holders above `c` hand down to it (a Transform3D in Unity space), or null.
+static func carry_above(c: Node):
+	var p: Node = c.get_parent() if c != null else null
+	if p is Control and p.has_meta(META_CARRY):
+		return p.get_meta(META_CARRY)
+	return null
 
 
 ## Is a rotation about z only (what Control.rotation can hold)?
@@ -307,7 +333,9 @@ static func _is_z_rotation(q: Quaternion) -> bool:
 
 ## The Godot properties of a Control for a set of Unity values (also used for prefab overrides,
 ## which are stored as property values of the instance).
-static func control_properties(v: Dictionary) -> Dictionary:
+## `carry`: what the plain holders above hand down (a Transform3D, or null); `carrying`: the
+## control is such a holder itself.
+static func control_properties(v: Dictionary, carry = null, carrying: bool = false) -> Dictionary:
 	var amin: Vector2 = v["anchor_min"]
 	var amax: Vector2 = v["anchor_max"]
 	var ap: Vector2 = v["anchored_position"]
@@ -319,7 +347,27 @@ static func control_properties(v: Dictionary) -> Dictionary:
 	var extra: Dictionary = {}
 	if absf(float(v["z"])) > 0.0:
 		extra["z"] = float(v["z"])
-	if _is_z_rotation(q):
+	var handed = null
+	if carry is Transform3D or carrying:
+		# the Unity values stay the control's own; what it shows is composed with what is handed
+		# down (its position too: the holder above has no size, so the anchored position is the
+		# local position, in the holder's turned and scaled space)
+		extra["rotation"] = q
+		extra["scale"] = sc
+		var total: Basis = Basis(q.normalized()) * Basis.from_scale(sc)
+		var depth: float = float(v["z"])
+		if carry is Transform3D:
+			total = (carry as Transform3D).basis * total
+			extra["anchored_position"] = ap
+			var at: Vector3 = (carry as Transform3D) * Vector3(ap.x, ap.y, float(v["z"]))
+			ap = Vector2(at.x, at.y)
+			depth = at.z
+		if carrying:
+			handed = Transform3D(total, Vector3(0.0, 0.0, depth))
+			rs = [0.0, Vector2.ONE]
+		else:
+			rs = planar_basis(total)
+	elif _is_z_rotation(q):
 		if sc.z != 1.0:
 			extra["scale_z"] = sc.z
 	else:
@@ -332,6 +380,7 @@ static func control_properties(v: Dictionary) -> Dictionary:
 		"pivot_offset": Vector2.ZERO, "pivot_offset_ratio": Vector2(pv.x, 1.0 - pv.y),
 		"rotation": rs[0], "scale": rs[1],
 		"metadata/" + String(META_RECT): extra if not extra.is_empty() else null,
+		"metadata/" + String(META_CARRY): handed,
 	}
 
 
@@ -372,7 +421,7 @@ static func set_values(n: Node, v: Dictionary) -> void:
 		return
 	if s is Control:
 		var c: Control = s
-		var p: Dictionary = control_properties(full)
+		var p: Dictionary = control_properties(full, carry_above(c), carries(c))
 		# (an anchor is clamped against its opposite unless that one is pushed: min first, then max)
 		c.set_anchor(SIDE_LEFT, p["anchor_left"], false, true)
 		c.set_anchor(SIDE_RIGHT, p["anchor_right"], false, true)
@@ -392,6 +441,19 @@ static func set_values(n: Node, v: Dictionary) -> void:
 				c.remove_meta(META_RECT)
 		else:
 			c.set_meta(META_RECT, extra)
+		var handed = p["metadata/" + String(META_CARRY)]
+		if handed is Transform3D:
+			var before = c.get_meta(META_CARRY) if c.has_meta(META_CARRY) else null
+			c.set_meta(META_CARRY, handed)
+			if not (before is Transform3D) or not (before as Transform3D).is_equal_approx(handed):
+				# what is below a holder follows what it hands down
+				for ch in c.get_children():
+					var below: Node = identity(ch)
+					if is_ui(below) and not ch.has_meta(META_HELPER) and not ch.has_meta(META_VIEW):
+						set_values(below, {})
+						_left_plane(store(below))
+		elif c.has_meta(META_CARRY):
+			c.remove_meta(META_CARRY)
 		return
 	s.set_meta(META_RECT, {
 		"anchor_min": full["anchor_min"], "anchor_max": full["anchor_max"], "anchored_position": full["anchored_position"],
@@ -579,6 +641,11 @@ static func local_position(n: Node) -> Vector3:
 	var s: Node = store(n)
 	if s is Control:
 		var c: Control = s
+		if c.has_meta(META_RECT) and (c.get_meta(META_RECT) as Dictionary).has("anchored_position"):
+			# below a plain holder (no size: the anchored position is the local position); what
+			# the Control shows is composed with the holder's rotation and scale
+			var own: Dictionary = c.get_meta(META_RECT)
+			return Vector3(own["anchored_position"].x, own["anchored_position"].y, float(own.get("z", 0.0)))
 		var r: Rect2 = _control_rect(c)
 		var pv: Vector2 = _control_pivot(c)
 		var gp: Vector2 = r.position + Vector2(pv.x * r.size.x, (1.0 - pv.y) * r.size.y)
@@ -775,9 +842,25 @@ static func _promote_if_out(s: Control) -> void:
 		return
 	if island_of(s) == null:
 		return   # screen space: drawn flat whatever its transform is
+	if carries(s):
+		return   # a plain holder shows nothing itself: what is below it is looked at
 	var v: Dictionary = values(s)
 	var depth: float = _parent_world(s).basis.z.length()
-	if is_planar(float(v["z"]), v["rotation"], depth):
+	var carry = carry_above(s)
+	if carry is Transform3D:
+		# below plain holders: the transform composed with what they hand down (their depth
+		# too), against the plane of the control the holders are in
+		var k: Transform3D = carry
+		var total: Basis = k.basis * Basis((v["rotation"] as Quaternion).normalized())
+		var at: Vector3 = k * Vector3(v["anchored_position"].x, v["anchored_position"].y, float(v["z"]))
+		var frame: Node = s.get_parent()
+		while frame is Control and frame.has_meta(META_CARRY):
+			frame = frame.get_parent()
+		var frame_depth: float = world_matrix(frame).basis.z.length() if is_ui(frame) else 1.0
+		var zaxis: Vector3 = total.z
+		if absf(at.z) * frame_depth <= flatten_depth() and zaxis.length_squared() > 1e-18 and absf(zaxis.normalized().z) >= TILT_COS:
+			return
+	elif is_planar(float(v["z"]), v["rotation"], depth):
 		return
 	promote(s)
 

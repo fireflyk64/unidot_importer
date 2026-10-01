@@ -53,6 +53,7 @@ func _init() -> void:
 	await _promotion()
 	await _nested_canvas()
 	await _screen_canvas()
+	await _plain_holders()
 	_rich_text()
 	await _text_nodes()
 	_graphics()
@@ -449,6 +450,99 @@ func eq(a, b, what: String) -> void:
 
 
 ## Unity rich text → BBCode and the characters shown.
+## Plain Transforms that hold UI: a holder turned out of the canvas plane whose rects are turned
+## back (vrcbce's desktop UI). The holder hands its rotation and scale down; the rects show the
+## composed transform and keep their own Unity values.
+func _plain_holders() -> void:
+	var holder: Node3D = _canvas(Vector3(0, 1, 0), 0.01)
+	var croot: Control = RT.root_control(holder)
+	var flat := Control.new()
+	flat.name = "Flat"
+	flat.set_meta(RT.META_PLAIN, true)
+	croot.add_child(flat)
+	var down := Quaternion(Vector3(1, 0, 0), -PI / 2.0)
+	var back := Quaternion(Vector3(1, 0, 0), PI / 2.0)
+	_rt(flat, {"anchored_position": Vector2(30, 20), "size_delta": Vector2.ZERO, "rotation": down, "scale": Vector3(50, 50, 50)})
+	near(flat.rotation, 0.0, "a plain holder does not turn as a Control")
+	near(flat.scale, Vector2.ONE, "... nor scale")
+	near(RT.local_rotation(flat), down, "... its rotation is still its own")
+	near(RT.local_scale(flat), Vector3(50, 50, 50), "... and its scale")
+	var img: TextureRect = _image(flat, "Img", {"anchored_position": Vector2(1.5, 0), "z": 0.4, "size_delta": Vector2(40, 20), "rotation": back, "scale": Vector3(0.02, 0.02, 0.02)})
+	near(img.rotation, 0.0, "a rect turned back below it is in the plane again: no rotation")
+	near(img.scale, Vector2(1, 1), "... the scales multiply (50 x 0.02)")
+	near(RT.local_rotation(img), back, "... while its Unity rotation stays what it is")
+	near(RT.local_scale(img), Vector3(0.02, 0.02, 0.02), "... and its scale")
+	near(RT.local_position(img), Vector3(1.5, 0, 0.4), "... and its local position (in the holder's space)")
+	near(RT.anchored_position(img), Vector2(1.5, 0), "... which is its anchored position")
+	await process_frame
+	await process_frame
+	ok(RT.holder_of(flat) == null and RT.holder_of(img) == null, "nothing needs a canvas of its own: the composed transform is planar")
+	# local (1.5, 0, 0.4) in the holder turned -90 degrees about x and scaled 50: (75, 20, 0)
+	near(RT.world_position(img), Vector3(0.3 + 0.75, 1 + 0.2 + 0.2, 0), "world position through the holder", 1e-3)
+	near(RT.drawn_point(img, img.size * 0.5), Vector3(0.3 + 0.75, 1 + 0.2 + 0.2, 0), "... and it is drawn there", 2e-3)
+	near(RT.drawn_point(img, Vector2.ZERO), Vector3(0.3 + 0.75 - 0.2, 1 + 0.4 + 0.1, 0), "... as large as 40 x 20 units", 2e-3)
+	# the holder turns: what is below it follows, and leaves the plane
+	RT.set_local_rotation(flat, Quaternion.IDENTITY)
+	near(img.scale, Vector2(1, 0), "the holder is turned: the rect below shows its new projection (edge on)", 1e-4)
+	await process_frame
+	await process_frame
+	ok(RT.holder_of(img) != null and RT.holder_of(flat) == null, "... and gets a canvas of its own, the holder does not")
+	near(RT.world_position(img), Vector3(0.3 + 0.75, 1.2, 0.2), "... at its place in space", 2e-3)
+	# a holder that is off the plane (along z): what is below it is off the plane too
+	var lifted := Control.new()
+	lifted.name = "Lifted"
+	lifted.set_meta(RT.META_PLAIN, true)
+	croot.add_child(lifted)
+	_rt(lifted, {"anchored_position": Vector2(-50, 0), "z": -30.0, "size_delta": Vector2.ZERO, "scale": Vector3(0.5, 0.5, 0.5)})
+	var label: TextureRect = _image(lifted, "Label", {"anchored_position": Vector2(10, 0), "size_delta": Vector2(20, 10)})
+	near(label.scale, Vector2(0.5, 0.5), "below a scaled holder: its scale")
+	RT.promote_out_of_plane(holder)   # (what a canvas does at start for the values it was built with)
+	await process_frame
+	await process_frame
+	ok(RT.holder_of(lifted) == null and RT.holder_of(label) != null, "a rect below a holder that is off the plane gets a canvas of its own")
+	near(RT.world_position(label), Vector3(-0.5 + 0.05, 1, -0.3), "... at the holder's depth", 2e-3)
+	near(RT.world_position(lifted), Vector3(-0.5, 1, -0.3), "... and the holder knows where it is", 2e-3)
+	holder.queue_free()
+	await process_frame
+	# the same on a screen canvas, where nothing gets a canvas of its own
+	var canvas := Node3D.new()
+	canvas.name = "Overlay"
+	root.add_child(canvas)
+	var layer := CanvasLayer.new()
+	canvas.add_child(layer)
+	var sroot := Control.new()
+	sroot.name = "Canvas"
+	layer.add_child(sroot)
+	sroot.size = Vector2(800, 600)
+	canvas.set_meta(RT.META_CANVAS, {"mode": "overlay", "root": canvas.get_path_to(sroot)})
+	var sflat := Control.new()
+	sflat.name = "Flat"
+	sflat.set_meta(RT.META_PLAIN, true)
+	sroot.add_child(sflat)
+	_rt(sflat, {"anchor_min": Vector2.ZERO, "anchor_max": Vector2.ZERO, "anchored_position": Vector2(200, 100), "size_delta": Vector2.ZERO, "rotation": down, "scale": Vector3(50, 50, 50)})
+	var simg: TextureRect = _image(sflat, "Img", {"anchored_position": Vector2(0, 0), "size_delta": Vector2(100, 60), "rotation": back, "scale": Vector3(0.02, 0.02, 0.02)})
+	var inner := Control.new()
+	inner.name = "Inner"
+	inner.set_meta(RT.META_PLAIN, true)
+	sflat.add_child(inner)
+	_rt(inner, {"anchored_position": Vector2(-1, 0), "z": -0.5, "size_delta": Vector2.ZERO})
+	var deep: TextureRect = _image(inner, "Deep", {"anchored_position": Vector2(0, 0), "size_delta": Vector2(60, 60), "rotation": back, "scale": Vector3(0.01, 0.01, 0.01)})
+	await process_frame
+	near(simg.get_global_rect(), Rect2(150, 600 - 100 - 30, 100, 60), "screen canvas: the rect below a turned holder is whole", 0.01)
+	near(inner.get_global_rect().position, Vector2(150, 600 - 100 + 25), "a holder inside the holder is placed in the turned space", 0.01)
+	near(deep.get_global_rect(), Rect2(150 - 15, 600 - 100 + 25 - 15, 30, 30), "... and hands on what it was handed (50 x 0.01)", 0.01)
+	var tilted := Control.new()
+	tilted.name = "Tilted"
+	tilted.set_meta(RT.META_PLAIN, true)
+	sroot.add_child(tilted)
+	_rt(tilted, {"anchor_min": Vector2.ZERO, "anchor_max": Vector2.ZERO, "anchored_position": Vector2(400, 300), "size_delta": Vector2.ZERO, "rotation": Quaternion(Vector3(1, 0, 0), PI / 3.0)})
+	var timg: TextureRect = _image(tilted, "Img", {"anchored_position": Vector2(0, 0), "size_delta": Vector2(100, 100)})
+	await process_frame
+	near(timg.get_global_transform().basis_xform(timg.size), Vector2(100, 50), "what stays tilted is shortened on the screen (cos 60)", 0.01)
+	canvas.queue_free()
+	await process_frame
+
+
 func _rich_text() -> void:
 	eq(UiText.to_bbcode("plain", true, 0, 20.0), "plain", "plain text is unchanged")
 	eq(UiText.to_bbcode("<b>B</b><i>I</i><u>U</u><s>S</s>", true, 0, 20.0), "[b]B[/b][i]I[/i][u]U[/u][s]S[/s]", "bold, italic, underline, strikethrough")

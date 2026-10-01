@@ -400,7 +400,7 @@ static func rect_override_properties(node: Node, uprops: Dictionary) -> Dictiona
 	if not RT._prefab_rect(s).is_empty():
 		return {"metadata/" + String(RT.META_PREFAB_RECT): v}   # the root of a prefab variant
 	if s is Control:
-		return RT.control_properties(v)
+		return RT.control_properties(v, RT.carry_above(s), RT.carries(s))
 	var out: Dictionary = {"metadata/" + String(RT.META_RECT): v}
 	if s is Node3D and not RT.is_nested(s):
 		var ap: Vector2 = v["anchored_position"]
@@ -410,8 +410,9 @@ static func rect_override_properties(node: Node, uprops: Dictionary) -> Dictiona
 	return out
 
 
-## Metadata flag of the Control a plain Transform inside a canvas became.
-const META_PLAIN := &"unidot_plain_transform"
+## Metadata flag of the Control a plain Transform inside a canvas became (see rect_transform.gd:
+## it hands its rotation and scale down to the rects below it).
+const META_PLAIN := RT.META_PLAIN
 
 
 ## Is there a RectTransform somewhere below this Transform (in its own file)?
