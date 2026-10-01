@@ -113,6 +113,8 @@ static func drawn_color(ctl: Control):
 	var sprite: CanvasItem = ctl.get_node_or_null(^"UnidotSprite") as CanvasItem
 	if sprite != null:
 		c = sprite.self_modulate   # a sliced / tiled / filled sprite is drawn by this helper
+		if sprite.has_method(&"draws") and not sprite.draws():
+			c.a = 0.0
 	elif ctl is TextureRect:
 		c = ctl.self_modulate if ctl.texture != null else Color(1, 1, 1, 0)
 	elif ctl is RichTextLabel:

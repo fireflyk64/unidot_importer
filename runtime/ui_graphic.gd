@@ -97,6 +97,11 @@ static func drawn_color(ctl: Node) -> Color:
 	var c: Color = (s["color"] as Color) * (s["renderer"] as Color)
 	if not bool(s["enabled"]) or bool(s["hidden"]):
 		c.a = 0.0
+	# a filled sprite with no fill amount has no mesh (an Image without a sprite is drawn whole)
+	var sprite = s.get("sprite")
+	if sprite is Dictionary and int(sprite.get("type", 0)) == 3 and float(sprite.get("amount", 1.0)) < 0.001:
+		if s.get("texture") is Texture2D or (ctl is TextureRect and ctl.texture != null):
+			c.a = 0.0
 	return c
 
 

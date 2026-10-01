@@ -238,7 +238,11 @@ func _sprite_pixel(c: Control, tex: Texture2D, sprite: Dictionary, local: Vector
 			return region.position + t
 		Sprite.FILLED:
 			if int(sprite.get("method", 4)) > 1:
-				return region.position + local / c.size * region.size
+				# radial: the swept angle, in the rect's proportions (y up)
+				var at: Vector2 = local / c.size
+				if not Sprite.radial_covers(Vector2(at.x, 1.0 - at.y), int(sprite.get("method", 4)), int(sprite.get("origin", 0)), float(sprite.get("amount", 1.0)), bool(sprite.get("clockwise", true))):
+					return null
+				return region.position + at * region.size
 			var rects: Array = Sprite.fill_rects(c.size, region.size, int(sprite.get("method", 0)), int(sprite.get("origin", 0)), float(sprite.get("amount", 1.0)))
 			var dest: Rect2 = rects[0]
 			if dest.size.x <= 0.0 or dest.size.y <= 0.0 or not dest.has_point(local):
@@ -248,6 +252,22 @@ func _sprite_pixel(c: Control, tex: Texture2D, sprite: Dictionary, local: Vector
 			var tt = Sprite.tiled_texel(local, c.size, region.size, sprite.get("border", [0, 0, 0, 0]), float(sprite.get("unit", 1.0)), bool(sprite.get("center", true)))
 			return null if tt == null else region.position + (tt as Vector2)
 	return region.position + local / c.size * region.size
+
+
+## Is `local` (a point of the control) within `margin` (a fraction of the rect per axis) of the
+## edge of a radial fill? The picture decides nothing there.
+func _at_fill_edge(c: Control, sprite: Dictionary, local: Vector2, margin: Vector2) -> bool:
+	if int(sprite.get("type", 0)) != Sprite.FILLED or int(sprite.get("method", 4)) < 2:
+		return false
+	var at: Vector2 = local / c.size
+	var seen: Array = []
+	for d in [Vector2.ZERO, Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1), Vector2(1, 1), Vector2(-1, -1), Vector2(1, -1), Vector2(-1, 1)]:
+		var q: Vector2 = at + d * margin
+		var covered: bool = Sprite.radial_covers(Vector2(q.x, 1.0 - q.y), int(sprite.get("method", 4)), int(sprite.get("origin", 0)), float(sprite.get("amount", 1.0)), bool(sprite.get("clockwise", true)))
+		if not seen.is_empty() and seen[0] != covered:
+			return true
+		seen.append(covered)
+	return false
 
 
 ## Does the item draw at the viewport point `p` (inside its rect and its clipping ancestors;
@@ -309,6 +329,8 @@ func _check(vp: SubViewport, img: Image, canvas: String, problems: Array) -> int
 		if item[2] != 1:
 			fractions = []
 			var steps: Array = [0.25, 0.5, 0.75] if item[2] == 3 else [0.04, 0.27, 0.5, 0.73, 0.96]
+			if item[2] == 5 and int((item[6] as Dictionary).get("type", 0)) == Sprite.FILLED and int((item[6] as Dictionary).get("method", 4)) > 1:
+				steps = [0.08, 0.22, 0.4, 0.62, 0.8, 0.93]   # (a radial fill starts on the centre lines)
 			for fy in steps:
 				for fx in steps:
 					fractions.append(Vector2(fx, fy))
@@ -318,6 +340,9 @@ func _check(vp: SubViewport, img: Image, canvas: String, problems: Array) -> int
 		for frac in fractions:
 			var p: Vector2 = xf * (c.size * frac)
 			if p.x < 1.0 or p.y < 1.0 or p.x >= img.get_width() - 1.0 or p.y >= img.get_height() - 1.0:
+				continue
+			# (three pixels around the edge of a radial fill)
+			if item[2] == 5 and _at_fill_edge(c, item[6], c.size * frac, Vector2(3.0 / on_screen.x, 3.0 / on_screen.y)):
 				continue
 			# the topmost graphic at the point (later in the tree is drawn later) and the texts
 			# drawn over it

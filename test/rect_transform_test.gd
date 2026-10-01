@@ -790,6 +790,7 @@ func _sprites() -> void:
 	r = Sprite.fill_rects(Vector2(64, 96), Vector2(64, 64), 1, 1, 0.25)
 	near(r[0], Rect2(0, 0, 64, 24), "from the top, a quarter")
 	near(r[1], Rect2(0, 0, 64, 16), "... the upper quarter of the sprite")
+	_radial_fills()
 	# tiled (Image.GenerateTiledSprite): a 64 pixel sprite with 16 pixel borders in 150 x 90
 	var q: Array = Sprite.tiled_quads(Vector2(150, 90), s64, b16, 1.0, true)
 	# centre 118 x 58 in tiles of 32: 4 x 2 (the last of each cut), + 2 x 2 side and 2 x 4 top /
@@ -925,3 +926,58 @@ func _scroll_rect() -> void:
 	ok(not (expand[3] as Control).visible, "... and the bar hidden")
 	parent.queue_free()
 	await process_frame
+
+
+func _in_quads(quads: Array, p: Vector2) -> bool:
+	for q in quads:
+		if Geometry2D.is_point_in_polygon(p, PackedVector2Array(q)):
+			return true
+	return false
+
+
+## Radial fills: the quads Unity builds (Image.GenerateFilledSprite / RadialCut) against the
+## meaning of the fill, a swept angle. Points are in the rect's proportions, y up.
+func _radial_fills() -> void:
+	var q: Array = Sprite.radial_quads(4, 0, 0.25, true)
+	ok(q.size() == 1, "radial 360 from the bottom, clockwise, a quarter: one quad")
+	if q.size() == 1:
+		near(q[0][0], Vector2(0, 0), "... the bottom-left quarter")
+		near(q[0][2], Vector2(0.5, 0.5), "... up to the centre")
+	q = Sprite.radial_quads(4, 0, 0.125, true)
+	ok(_in_quads(q, Vector2(0.4, 0.1)) and not _in_quads(q, Vector2(0.1, 0.4)), "an eighth: the triangle between straight down and the bottom-left corner")
+	q = Sprite.radial_quads(4, 0, 0.125, false)
+	ok(_in_quads(q, Vector2(0.6, 0.1)) and not _in_quads(q, Vector2(0.4, 0.1)), "counter-clockwise: towards the bottom-right corner")
+	q = Sprite.radial_quads(4, 2, 0.6, true)
+	ok(_in_quads(q, Vector2(0.9, 0.9)) and _in_quads(q, Vector2(0.9, 0.1)) and _in_quads(q, Vector2(0.45, 0.1)) and not _in_quads(q, Vector2(0.1, 0.2)) and not _in_quads(q, Vector2(0.1, 0.9)),
+		"from the top, clockwise, 0.6: the right half and a little past the bottom")
+	q = Sprite.radial_quads(3, 0, 0.5, true)
+	ok(_in_quads(q, Vector2(0.25, 0.5)) and not _in_quads(q, Vector2(0.75, 0.5)), "radial 180 from the bottom, clockwise, half: the left half")
+	q = Sprite.radial_quads(3, 0, 0.5, false)
+	ok(_in_quads(q, Vector2(0.75, 0.5)) and not _in_quads(q, Vector2(0.25, 0.5)), "... counter-clockwise: the right half")
+	q = Sprite.radial_quads(3, 1, 0.25, true)
+	ok(_in_quads(q, Vector2(0.2, 0.9)) and not _in_quads(q, Vector2(0.8, 0.7)) and not _in_quads(q, Vector2(0.5, 0.2)), "radial 180 from the left, clockwise, a quarter: the upper-left triangle")
+	q = Sprite.radial_quads(2, 0, 0.5, true)
+	ok(_in_quads(q, Vector2(0.2, 0.8)) and not _in_quads(q, Vector2(0.8, 0.2)), "radial 90 from the bottom-left, clockwise, half: the triangle above the diagonal")
+	q = Sprite.radial_quads(2, 2, 0.5, true)
+	ok(_in_quads(q, Vector2(0.8, 0.2)) and not _in_quads(q, Vector2(0.2, 0.8)), "radial 90 from the top-right, clockwise, half: the triangle below the diagonal")
+	ok(Sprite.radial_quads(4, 0, 0.0005, true).is_empty(), "almost no fill: nothing")
+	ok(Sprite.radial_quads(4, 1, 1.0, false).size() == 1, "a full fill: the whole rect, one quad")
+	# every method, origin and direction: the quads cover what the swept angle covers
+	var wrong: Array = []
+	var points: int = 0
+	for method in [2, 3, 4]:
+		for origin in range(4):
+			for clockwise in [true, false]:
+				for amount in [0.05, 0.125, 0.25, 0.3, 0.5, 0.6, 0.75, 0.875, 0.97]:
+					var quads: Array = Sprite.radial_quads(method, origin, amount, clockwise)
+					for ix in range(17):
+						for iy in range(17):
+							var p := Vector2((ix + 0.37) / 17.0, (iy + 0.61) / 17.0)
+							var want: bool = Sprite.radial_covers(p, method, origin, amount, clockwise)
+							# (not at the edge of the fill)
+							if Sprite.radial_covers(p, method, origin, amount - 0.004, clockwise) != want or Sprite.radial_covers(p, method, origin, minf(amount + 0.004, 0.999), clockwise) != want:
+								continue
+							points += 1
+							if _in_quads(quads, p) != want and wrong.size() < 5:
+								wrong.append("method %d origin %d %s amount %s at %s: %s" % [method, origin, "cw" if clockwise else "ccw", str(amount), str(p), "covered" if not want else "missing"])
+	ok(wrong.is_empty(), "radial quads cover the swept angle at %d points: %s" % [points, str(wrong)])

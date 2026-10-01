@@ -14,7 +14,8 @@ extends Control
 ##            unit: canvas units per sprite pixel (canvas reference pixels per unit / sprite
 ##                  pixels per unit / the Image's multiplier),
 ##            center: bool (fill centre),
-##            method (0 horizontal, 1 vertical, 2-4 radial), origin, amount, clockwise (filled)}
+##            method (0 horizontal, 1 vertical, 2 radial 90, 3 radial 180, 4 radial 360),
+##            origin, amount, clockwise (filled)}
 ## Sliced: nine patches as Unity builds them (Image.GenerateSlicedSprite): the borders keep
 ## their size, `unit` per sprite pixel, and shrink together on an axis where the rect is
 ## smaller than both of them. The colour comes from the parent's graphic state as this
@@ -159,8 +160,178 @@ static func fill_rects(size: Vector2, sprite_size: Vector2, method: int, origin:
 	return [dest, src]
 
 
+## The quads of a radially filled image (Image.GenerateFilledSprite; method 2 radial 90, 3 radial
+## 180, 4 radial 360), in the proportions of the rect: four points each in [0, 1] x [0, 1] with
+## y up, in Unity's order (bottom-left, top-left, top-right, bottom-right; points of a cut quad
+## may coincide). The same factors place a point in the rect and in the sprite.
+static func radial_quads(method: int, origin: int, amount: float, clockwise: bool) -> Array:
+	var out: Array = []
+	if amount < 0.001:
+		return out
+	if amount >= 1.0 or method < 2:
+		out.append([Vector2(0, 0), Vector2(0, 1), Vector2(1, 1), Vector2(1, 0)])
+		return out
+	if method == 2:
+		var whole: Array = [Vector2(0, 0), Vector2(0, 1), Vector2(1, 1), Vector2(1, 0)]
+		if _radial_cut(whole, amount, clockwise, origin):
+			out.append(whole)
+	elif method == 3:
+		# two halves, beside each other (origin bottom / top) or above each other (left / right)
+		var even: int = 1 if origin > 1 else 0
+		for side in range(2):
+			var lo := Vector2.ZERO
+			var hi := Vector2.ONE
+			if origin == 0 or origin == 2:
+				if side == even:
+					hi.x = 0.5
+				else:
+					lo.x = 0.5
+			elif side == even:
+				lo.y = 0.5
+			else:
+				hi.y = 0.5
+			var half: Array = [Vector2(lo.x, lo.y), Vector2(lo.x, hi.y), Vector2(hi.x, hi.y), Vector2(hi.x, lo.y)]
+			var val: float = (amount * 2.0 - side) if clockwise else (amount * 2.0 - (1 - side))
+			if _radial_cut(half, clampf(val, 0.0, 1.0), clockwise, (side + origin + 3) % 4):
+				out.append(half)
+	else:
+		# four quarters: bottom-left, top-left, top-right, bottom-right
+		for corner in range(4):
+			var lo := Vector2(0.0 if corner < 2 else 0.5, 0.0 if (corner == 0 or corner == 3) else 0.5)
+			var hi := lo + Vector2(0.5, 0.5)
+			var quarter: Array = [Vector2(lo.x, lo.y), Vector2(lo.x, hi.y), Vector2(hi.x, hi.y), Vector2(hi.x, lo.y)]
+			var turn: int = (corner + origin) % 4
+			var val: float = (amount * 4.0 - turn) if clockwise else (amount * 4.0 - (3 - turn))
+			if _radial_cut(quarter, clampf(val, 0.0, 1.0), clockwise, (corner + 2) % 4):
+				out.append(quarter)
+	return out
+
+
+## Image.RadialCut: the quad is cut along the ray that leaves its `corner` at `fill` of a
+## quarter turn. False when nothing is left of it.
+static func _radial_cut(xy: Array, fill: float, invert: bool, corner: int) -> bool:
+	if fill < 0.001:
+		return false
+	# (every other corner turns the other way)
+	if (corner & 1) == 1:
+		invert = not invert
+	if not invert and fill > 0.999:
+		return true
+	var angle: float = clampf(fill, 0.0, 1.0)
+	if invert:
+		angle = 1.0 - angle
+	angle *= PI * 0.5
+	var c: float = cos(angle)
+	var s: float = sin(angle)
+	var i0: int = corner
+	var i1: int = (corner + 1) % 4
+	var i2: int = (corner + 2) % 4
+	var i3: int = (corner + 3) % 4
+	var a: Vector2 = xy[i0]
+	var b: Vector2 = xy[i2]
+	if (corner & 1) == 1:
+		if s > c:
+			c /= s
+			s = 1.0
+			if invert:
+				xy[i1] = Vector2(lerpf(a.x, b.x, c), xy[i1].y)
+				xy[i2] = Vector2(xy[i1].x, xy[i2].y)
+		elif c > s:
+			s /= c
+			c = 1.0
+			if not invert:
+				xy[i2] = Vector2(xy[i2].x, lerpf(a.y, b.y, s))
+				xy[i3] = Vector2(xy[i3].x, xy[i2].y)
+		else:
+			c = 1.0
+			s = 1.0
+		# (Unity reads the opposite corner after it may have moved)
+		if not invert:
+			xy[i3] = Vector2(lerpf(a.x, xy[i2].x, c), xy[i3].y)
+		else:
+			xy[i1] = Vector2(xy[i1].x, lerpf(a.y, xy[i2].y, s))
+	else:
+		if c > s:
+			s /= c
+			c = 1.0
+			if not invert:
+				xy[i1] = Vector2(xy[i1].x, lerpf(a.y, b.y, s))
+				xy[i2] = Vector2(xy[i2].x, xy[i1].y)
+		elif s > c:
+			c /= s
+			s = 1.0
+			if invert:
+				xy[i2] = Vector2(lerpf(a.x, b.x, c), xy[i2].y)
+				xy[i3] = Vector2(xy[i2].x, xy[i3].y)
+		else:
+			c = 1.0
+			s = 1.0
+		if invert:
+			xy[i3] = Vector2(xy[i3].x, lerpf(a.y, xy[i2].y, s))
+		else:
+			xy[i1] = Vector2(lerpf(a.x, xy[i2].x, c), xy[i1].y)
+	return true
+
+
+## Whether a radially filled image covers the point `p` of its rect ([0, 1] x [0, 1], y up).
+## This is what a radial fill means, not how Unity builds it: the angle swept about the origin
+## (the centre for 360, the middle of an edge for 180, a corner for 90) in the proportions of
+## the rect, starting where a clockwise fill starts. The tests hold the quads against it.
+static func radial_covers(p: Vector2, method: int, origin: int, amount: float, clockwise: bool) -> bool:
+	if amount < 0.001:
+		return false
+	if amount >= 1.0 or method < 2:
+		return true
+	var centre := Vector2(0.5, 0.5)
+	var extent := Vector2(0.5, 0.5)
+	var start := Vector2(0, -1)   # where a clockwise fill starts
+	var total: float = TAU
+	if method == 4:
+		# bottom, right, top, left
+		start = [Vector2(0, -1), Vector2(1, 0), Vector2(0, 1), Vector2(-1, 0)][origin & 3]
+	elif method == 3:
+		# the middle of the bottom, left, top, right edge
+		var inward: Vector2 = [Vector2(0, 1), Vector2(1, 0), Vector2(0, -1), Vector2(-1, 0)][origin & 3]
+		centre = Vector2(0.5, 0.5) - inward * 0.5
+		extent = Vector2(1.0 if inward.x != 0.0 else 0.5, 1.0 if inward.y != 0.0 else 0.5)
+		start = Vector2(-inward.y, inward.x)
+		total = PI
+	else:
+		# the bottom-left, top-left, top-right, bottom-right corner
+		centre = [Vector2(0, 0), Vector2(0, 1), Vector2(1, 1), Vector2(1, 0)][origin & 3]
+		extent = Vector2.ONE
+		var diagonal: Vector2 = (Vector2(0.5, 0.5) - centre) * 2.0
+		start = Vector2(diagonal.x - diagonal.y, diagonal.x + diagonal.y) * 0.5
+		total = PI * 0.5
+	var d: Vector2 = (p - centre) / extent
+	if d.is_zero_approx():
+		return true
+	var swept: float
+	if clockwise:
+		swept = fposmod(atan2(start.y, start.x) - atan2(d.y, d.x), TAU)
+	else:
+		# counter-clockwise from the other end
+		swept = fposmod(atan2(d.y, d.x) - (atan2(start.y, start.x) - total), TAU)
+	return swept <= amount * total
+
+
 func _ready() -> void:
 	resized.connect(queue_redraw)
+
+
+## False when there is nothing to draw at all: a filled sprite without fill amount (Unity builds
+## no mesh; an Image without a sprite is drawn whole whatever its type).
+func draws() -> bool:
+	var host: Control = get_parent() as Control
+	if host == null or not host.has_meta(META_GRAPHIC):
+		return false
+	var state: Dictionary = host.get_meta(META_GRAPHIC)
+	var sprite: Dictionary = state.get("sprite", {})
+	if sprite.is_empty():
+		return false
+	if state.get("texture") == null and not (host is TextureRect and host.texture != null):
+		return true
+	return not (int(sprite.get("type", 0)) == FILLED and float(sprite.get("amount", 1.0)) < 0.001)
 
 
 func _draw() -> void:
@@ -194,8 +365,16 @@ func _draw() -> void:
 		FILLED:
 			var method: int = int(sprite.get("method", 4))
 			if method > 1:
-				# radial fills are drawn whole
-				draw_texture_rect_region(src[0], Rect2(Vector2.ZERO, size), region)
+				var tex_size: Vector2 = (src[0] as Texture2D).get_size()
+				var white := PackedColorArray([Color.WHITE, Color.WHITE, Color.WHITE, Color.WHITE])
+				for quad in radial_quads(method, int(sprite.get("origin", 0)), float(sprite.get("amount", 1.0)), bool(sprite.get("clockwise", true))):
+					var points := PackedVector2Array()
+					var uvs := PackedVector2Array()
+					for v in quad:
+						var at := Vector2(v.x, 1.0 - v.y)
+						points.append(at * size)
+						uvs.append((region.position + at * region.size) / tex_size)
+					draw_primitive(points, white, uvs, src[0])
 				return
 			var rects: Array = fill_rects(size, region.size, method, int(sprite.get("origin", 0)), float(sprite.get("amount", 1.0)))
 			var part: Rect2 = rects[1]
