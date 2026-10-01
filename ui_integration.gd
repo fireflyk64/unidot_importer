@@ -365,6 +365,17 @@ static func rect_override_properties(node: Node, uprops: Dictionary) -> Dictiona
 	elif uprops.get("m_LocalPosition") is Vector3:
 		v["z"] = uprops["m_LocalPosition"].z
 		changed = true
+	if RT.store(node).has_meta(META_PLAIN):
+		# a plain Transform: x and y of its local position are its anchored position
+		var ap: Vector2 = v["anchored_position"]
+		if uprops.get("m_LocalPosition") is Vector3:
+			ap = Vector2(uprops["m_LocalPosition"].x, uprops["m_LocalPosition"].y)
+			changed = true
+		for axis in ["x", "y"]:
+			if uprops.has("m_LocalPosition." + axis):
+				ap[axis] = float(uprops["m_LocalPosition." + axis])
+				changed = true
+		v["anchored_position"] = ap
 	var q: Quaternion = v["rotation"]
 	if uprops.get("m_LocalRotation") is Quaternion:
 		q = uprops["m_LocalRotation"]
@@ -399,11 +410,62 @@ static func rect_override_properties(node: Node, uprops: Dictionary) -> Dictiona
 	return out
 
 
+## Metadata flag of the Control a plain Transform inside a canvas became.
+const META_PLAIN := &"unidot_plain_transform"
+
+
+## Is there a RectTransform somewhere below this Transform (in its own file)?
+func _holds_ui(transform: RefCounted, depth: int = 0) -> bool:
+	if depth > 32 or not (transform.keys.get("m_Children") is Array):
+		return false
+	for ref in transform.keys["m_Children"]:
+		var child = transform.meta.lookup(ref, true)
+		if child == null:
+			continue
+		if child.type == "RectTransform" or _holds_ui(child, depth + 1):
+			return true
+	return false
+
+
+## The rect of a plain Transform below a Control: no size, at its local position from the
+## parent's pivot (the origin of the parent's space), with its rotation and scale.
+static func plain_values(keys: Dictionary, parent: Control) -> Dictionary:
+	var v: Dictionary = RT._defaults()
+	var pivot: Vector2 = RT.values(parent)["pivot"]
+	v["anchor_min"] = pivot
+	v["anchor_max"] = pivot
+	v["size_delta"] = Vector2.ZERO
+	if keys.get("m_LocalPosition") is Vector3:
+		var lp: Vector3 = keys["m_LocalPosition"]
+		v["anchored_position"] = Vector2(lp.x, lp.y)
+		v["z"] = lp.z
+	if keys.get("m_LocalRotation") is Quaternion:
+		v["rotation"] = (keys["m_LocalRotation"] as Quaternion).normalized()
+	if keys.get("m_LocalScale") is Vector3:
+		v["scale"] = keys["m_LocalScale"]
+	return v
+
+
 ## GameObjects with a RectTransform become Controls; the class follows the main UI component.
+## A plain Transform inside a canvas that has RectTransforms below it becomes a Control too: it
+## has no rect, but what is below it is UI of that canvas, laid out against no parent rect.
 func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node) -> Node:
 	var transform = go.transform
-	if transform == null or transform.type != "RectTransform":
+	if transform == null:
 		return null
+	if transform.type != "RectTransform":
+		var host: Node = RT.child_host(new_parent)
+		if transform.type != "Transform" or not (host is Control) or not _holds_ui(transform):
+			return null
+		var plain := Control.new()
+		plain.name = go.name
+		plain.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		plain.set_meta(META_PLAIN, true)
+		state.add_child(plain, host, transform)
+		RT.set_values(plain, plain_values(transform.keys, host))
+		plain.visible = go.enabled if "enabled" in go else true
+		stats["ui_nodes"] += 1
+		return plain
 	var parent: Node = RT.child_host(new_parent)
 	var canvas = go.GetComponent("Canvas")
 	if canvas == null and not (parent is Control) and new_parent != null:

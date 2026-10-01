@@ -261,7 +261,7 @@ class UnidotObject:
 
 	# Called once per component, not per-node. Only use for things that need a reference to the component
 	func apply_component_props(node: Node, props: Dictionary):
-		if props.has("scale"):
+		if props.get("scale") is Vector3:   # (not the scale of a Control)
 			var signs: Vector3 = (props["scale"].sign() + Vector3(0.5,0.5,0.5)).sign()
 			if not signs.is_equal_approx(Vector3.ONE) and not signs.is_equal_approx(-Vector3.ONE):
 				meta.transform_fileid_to_scale_signs[fileID] = signs
@@ -4306,6 +4306,11 @@ class UnidotGameObject:
 
 		state.prefab_state.gameobject_name_map[self.fileID] = name_map
 		state.prefab_state.prefab_gameobject_name_map[self.fileID] = prefab_name_map
+		# An inactive GameObject shows nothing of itself or of what is below it. (m_IsActive was
+		# only applied where a prefab instance overrides it; a component's m_Enabled does not
+		# make its object visible.)
+		if not self.enabled and (ret is Node3D or ret is CanvasItem):
+			ret.visible = false
 		for plugin in meta.get_enabled_plugins():
 			plugin.setup_post_children(self, state, ret, this_avatar_meta)
 
@@ -5085,6 +5090,9 @@ class UnidotTransform:
 	func convert_properties(node: Node, uprops: Dictionary) -> Dictionary:
 		# FIXME: Do we need convert_properties_component?
 		# var outdict = convert_properties_component(node, uprops)
+		# (a plain Transform inside a canvas that holds UI is a Control: see ui_integration.gd)
+		if type == "Transform" and node is Control and node.has_meta(ui_integration.META_PLAIN):
+			return ui_integration.rect_override_properties(node, uprops)
 		var n3d: Node3D = node as Node3D
 		if n3d == null:
 			log_warn("Unable to convert Transform properties using original values.")
