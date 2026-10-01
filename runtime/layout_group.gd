@@ -207,6 +207,10 @@ func _ask(c: Node, axis: int) -> Array:
 static func _content_size(ctl: Control, axis: int) -> Vector2:
 	if ctl is Label or ctl is RichTextLabel:
 		return Vector2(UiText.preferred_size(ctl, 0) if axis == 0 else 0.0, UiText.preferred_size(ctl, 1) if axis == 1 else 0.0)
+	# an Image asks for its sprite's size in canvas units, or for its borders when it is sliced
+	# or tiled (the importer worked that out: `preferred` of the graphic metadata)
+	if ctl.has_meta(&"unidot_graphic") and (ctl.get_meta(&"unidot_graphic") as Dictionary).get("preferred") is Vector2:
+		return ctl.get_meta(&"unidot_graphic")["preferred"]
 	if ctl is TextureRect:
 		# an Image without a sprite asks for nothing (the importer gives it a small white texture)
 		var tex: Texture2D = ctl.texture

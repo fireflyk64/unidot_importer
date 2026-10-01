@@ -11,15 +11,18 @@ extends SceneTree
 ## --check 1: the rendered pixels must show what the transforms put there. Positions computed
 ## from transforms and positions on screen are two things: the engine may draw a control
 ## elsewhere than its transform says (snapping, stale canvas items), which no check of
-## transforms can see. Sampled are five points of every solid-colour graphic and nine of every
-## sprite (where its texture is opaque and even) that no other graphic covers; under a text the
-## pixel may be anything between the graphic's colour and the text's. A graphic is reported
-## when most of its points show something else.
+## transforms can see. Sampled are five points of every solid-colour graphic, nine of every
+## stretched sprite and twenty-five of every sliced, tiled or filled one (where its texture is
+## opaque and even, mapped through the slices as Unity builds them; where such a sprite draws
+## nothing, what lies behind must show) that no other graphic covers; under a text the pixel
+## may be anything between the graphic's colour and the text's. A graphic is reported when
+## most of its points show something else.
 ## --static 1: scripts that are not unidot's own are removed first (the scene as imported).
 ## --all 1: every UI object is made visible first (menus that a script shows later are rendered
 ## and checked too; they may overlap).
 
 const RT := preload("../runtime/rect_transform.gd")
+const Sprite := preload("../runtime/ui_sprite.gd")
 
 
 func _init() -> void:
@@ -100,13 +103,24 @@ func _find(n: Node, out: Array) -> void:
 		_find(c, out)
 
 
-## What a control draws at its rect: [kind, colour, texture]. kind 0 nothing, 1 one opaque
-## colour, 2 something that is not compared (a translucent colour, another canvas, a widget),
-## 3 a texture stretched over the rect and multiplied by the colour, 4 text in that colour.
+## What a control draws at its rect: [kind, colour, texture, sprite]. kind 0 nothing, 1 one
+## opaque colour, 2 something that is not compared (a translucent colour, another canvas, a
+## widget), 3 a texture stretched over the rect and multiplied by the colour, 4 text in that
+## colour, 5 a sliced / tiled / filled sprite (drawn by the helper child, runtime/ui_sprite.gd).
 func _drawn(c: Control, fade: Color) -> Array:
 	var col = null
 	if c.has_meta(RT.META_VIEW):
 		return [2, Color.WHITE]
+	var helper: Control = c.get_node_or_null(Sprite.HELPER) as Control
+	if helper != null and c.has_meta(Sprite.META_GRAPHIC):
+		var state: Dictionary = c.get_meta(Sprite.META_GRAPHIC)
+		var stex: Texture2D = state.get("texture") as Texture2D
+		if stex == null and c is TextureRect:
+			stex = c.texture
+		var tint: Color = helper.self_modulate * fade
+		if stex == null or tint.a <= 0.004:
+			return [0, Color.WHITE]
+		return [5, tint, stex, state.get("sprite", {})]
 	if c is TextureRect:
 		if c.texture == null:
 			return [0, Color.WHITE]
@@ -153,7 +167,7 @@ func _collect(c: Control, fade: Color, clips: Array, out: Array) -> void:
 		return
 	var f: Color = fade * c.modulate
 	var d: Array = _drawn(c, f)
-	out.append([c, c.get_global_transform_with_canvas(), d[0], d[1], clips, d[2] if d.size() > 2 else null])
+	out.append([c, c.get_global_transform_with_canvas(), d[0], d[1], clips, d[2] if d.size() > 2 else null, d[3] if d.size() > 3 else {}])
 	var inner: Array = clips
 	if c.clip_contents or c is ScrollContainer:
 		inner = clips.duplicate()
@@ -188,12 +202,15 @@ func _even_texel(tex: Texture2D, uv: Vector2, footprint: Vector2):
 	var im: Image = _texture_image(tex)
 	if im == null or im.is_empty():
 		return null
+	return _even_pixel(im, Vector2(uv.x * im.get_width(), uv.y * im.get_height()),
+		maxi(int(ceil(footprint.x * im.get_width() * 2.0)), 3), maxi(int(ceil(footprint.y * im.get_height() * 2.0)), 3))
+
+
+func _even_pixel(im: Image, at: Vector2, rx: int, ry: int):
 	var w: int = im.get_width()
 	var h: int = im.get_height()
-	var cx: int = clampi(int(uv.x * w), 0, w - 1)
-	var cy: int = clampi(int(uv.y * h), 0, h - 1)
-	var rx: int = maxi(int(ceil(footprint.x * w * 2.0)), 3)
-	var ry: int = maxi(int(ceil(footprint.y * h * 2.0)), 3)
+	var cx: int = clampi(int(at.x), 0, w - 1)
+	var cy: int = clampi(int(at.y), 0, h - 1)
 	if cx - rx < 0 or cy - ry < 0 or cx + rx >= w or cy + ry >= h:
 		return null
 	var c0: Color = im.get_pixel(cx, cy)
@@ -203,6 +220,49 @@ func _even_texel(tex: Texture2D, uv: Vector2, footprint: Vector2):
 			if absf(c.r - c0.r) > 0.02 or absf(c.g - c0.g) > 0.02 or absf(c.b - c0.b) > 0.02 or absf(c.a - c0.a) > 0.02:
 				return null
 	return c0
+
+
+## The pixel of its texture that a sliced / tiled / filled sprite shows at `local` (a point of
+## the control), as Unity builds the image; null where it draws nothing.
+func _sprite_pixel(c: Control, tex: Texture2D, sprite: Dictionary, local: Vector2):
+	var src: Array = Sprite.source(tex)
+	var region: Rect2 = src[1]
+	match int(sprite.get("type", 0)):
+		Sprite.SLICED:
+			var border: Array = sprite.get("border", [0, 0, 0, 0])
+			var t: Vector2 = Sprite.slice_texel(local, c.size, region.size, border, float(sprite.get("unit", 1.0)))
+			if not bool(sprite.get("center", true)) and t.x > float(border[0]) and t.x < region.size.x - float(border[2]) and t.y > float(border[1]) and t.y < region.size.y - float(border[3]):
+				return null
+			return region.position + t
+		Sprite.FILLED:
+			if int(sprite.get("method", 4)) > 1:
+				return region.position + local / c.size * region.size
+			var rects: Array = Sprite.fill_rects(c.size, region.size, int(sprite.get("method", 0)), int(sprite.get("origin", 0)), float(sprite.get("amount", 1.0)))
+			var dest: Rect2 = rects[0]
+			if dest.size.x <= 0.0 or dest.size.y <= 0.0 or not dest.has_point(local):
+				return null
+			return region.position + (rects[1] as Rect2).position + (local - dest.position) / dest.size * (rects[1] as Rect2).size
+		Sprite.TILED:
+			var unit: float = float(sprite.get("unit", 1.0))
+			var tile: Vector2 = region.size * unit
+			if tile.x <= 0.0 or tile.y <= 0.0:
+				return null
+			return region.position + Vector2(fmod(local.x, tile.x) / unit, region.size.y - fmod(c.size.y - local.y, tile.y) / unit)
+	return region.position + local / c.size * region.size
+
+
+## Does the item draw at the viewport point `p` (inside its rect and its clipping ancestors;
+## a sliced sprite without centre or a partly filled one not everywhere)?
+func _draws_at(item: Array, p: Vector2) -> bool:
+	if item[2] == 0 or not _inside(item[0], item[1], p):
+		return false
+	for clip in item[4]:
+		if not _inside(clip, (clip as Control).get_global_transform_with_canvas(), p):
+			return false
+	if item[2] == 5:
+		var local: Vector2 = (item[1] as Transform2D).affine_inverse() * p
+		return _sprite_pixel(item[0], item[5], item[6], local) != null
+	return true
 
 
 var graphics_seen: int = 0
@@ -237,7 +297,7 @@ func _check(vp: SubViewport, img: Image, canvas: String, problems: Array) -> int
 	var points: int = 0
 	for index in range(items.size()):
 		var item: Array = items[index]
-		if item[2] != 1 and item[2] != 3:
+		if not (item[2] in [1, 3, 5]):
 			continue
 		graphics_seen += 1
 		var c: Control = item[0]
@@ -247,10 +307,11 @@ func _check(vp: SubViewport, img: Image, canvas: String, problems: Array) -> int
 		if on_screen.x < 4.0 or on_screen.y < 4.0:
 			continue
 		var fractions: Array = [Vector2(0.5, 0.5), Vector2(0.3, 0.3), Vector2(0.7, 0.3), Vector2(0.3, 0.7), Vector2(0.7, 0.7)]
-		if item[2] == 3:
+		if item[2] != 1:
 			fractions = []
-			for fy in [0.25, 0.5, 0.75]:
-				for fx in [0.25, 0.5, 0.75]:
+			var steps: Array = [0.25, 0.5, 0.75] if item[2] == 3 else [0.04, 0.27, 0.5, 0.73, 0.96]
+			for fy in steps:
+				for fx in steps:
 					fractions.append(Vector2(fx, fy))
 		var misdrawn: int = 0
 		var first: String = ""
@@ -259,37 +320,43 @@ func _check(vp: SubViewport, img: Image, canvas: String, problems: Array) -> int
 			var p: Vector2 = xf * (c.size * frac)
 			if p.x < 1.0 or p.y < 1.0 or p.x >= img.get_width() - 1.0 or p.y >= img.get_height() - 1.0:
 				continue
-			# is this graphic the topmost at the point (later in the tree is drawn later), and
-			# which texts are drawn over it?
-			var covered: bool = false
+			# the topmost graphic at the point (later in the tree is drawn later) and the texts
+			# drawn over it
+			var top: int = -1
 			var texts: Array = []
 			for j in range(items.size()):
-				var other: Array = items[j]
-				if j == index or other[2] == 0 or not _inside(other[0], other[1], p):
+				if not _draws_at(items[j], p):
 					continue
-				var clipped: bool = false
-				for clip in other[4]:
-					if not _inside(clip, (clip as Control).get_global_transform_with_canvas(), p):
-						clipped = true
-				if clipped or j < index:
-					continue
-				if other[2] == 4:
-					texts.append(other[3])
+				if items[j][2] == 4:
+					texts.append(items[j][3])
 				else:
-					covered = true
-			for clip in item[4]:
-				if not _inside(clip, (clip as Control).get_global_transform_with_canvas(), p):
-					covered = true
-			if covered:
+					top = j
+					texts = []
+			var want = null
+			var tolerance: float = 0.06
+			var shown_by: Control = c
+			if top == index:
+				if item[2] == 1:
+					want = item[3]
+				elif item[2] == 3:
+					var texel = _even_texel(item[5], frac, Vector2(1.0 / on_screen.x, 1.0 / on_screen.y))
+					if texel != null:
+						want = (texel as Color) * (item[3] as Color)
+						tolerance = 0.1
+				else:
+					var im: Image = _texture_image(Sprite.source(item[5])[0])
+					var at = _sprite_pixel(c, item[5], item[6], c.size * frac)
+					var even = _even_pixel(im, at, 3, 3) if im != null and at != null else null
+					if even != null:
+						want = (even as Color) * (item[3] as Color)
+						tolerance = 0.1
+			elif item[2] == 5 and not _draws_at(item, p) and _inside(c, xf, p):
+				# a hole of the sprite (no centre, the unfilled part): what lies behind shows
+				if top >= 0 and items[top][2] == 1:
+					want = items[top][3]
+					shown_by = items[top][0]
+			if want == null or (want as Color).a < 0.996:
 				continue
-			var want: Color = item[3]
-			if item[2] == 3:
-				var texel = _even_texel(item[5], frac, Vector2(1.0 / on_screen.x, 1.0 / on_screen.y))
-				if texel == null:
-					continue
-				want = (texel as Color) * (item[3] as Color)
-				if want.a < 0.996:
-					continue
 			sampled += 1
 			var shown: bool = false
 			var got := Color()
@@ -298,15 +365,15 @@ func _check(vp: SubViewport, img: Image, canvas: String, problems: Array) -> int
 					var px: Color = img.get_pixel(int(p.x) + dx, int(p.y) + dy)
 					if dx == 0 and dy == 0:
 						got = px
-					if _shows(px, want, texts, 0.06 if item[2] == 1 else 0.1):
+					if _shows(px, want, texts, tolerance):
 						shown = true
 			if not shown:
 				misdrawn += 1
 				if first == "":
-					first = "pixel (%d, %d) is %s, the transforms put %s there (%s)" % [int(p.x), int(p.y), str(got), str(c.name), str(want)]
+					first = "pixel (%d, %d) is %s, the transforms put %s there (%s)" % [int(p.x), int(p.y), str(got), str(shown_by.name), str(want)]
 		points += sampled
 		if sampled > 0:
 			graphics_checked += 1
-		if misdrawn * 2 > sampled:
+		if misdrawn * 2 > sampled or (item[2] == 5 and misdrawn > 0):
 			problems.append("%s :: %s: %d of %d points; %s" % [canvas, str(vp.get_child(0).get_path_to(c)), misdrawn, sampled, first])
 	return points

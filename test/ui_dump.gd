@@ -110,7 +110,10 @@ static func rendered(c: Control, local: Vector2) -> Vector3:
 ## null for a control that draws no graphic of its own (a plain container).
 static func drawn_color(ctl: Control):
 	var c = null
-	if ctl is TextureRect:
+	var sprite: CanvasItem = ctl.get_node_or_null(^"UnidotSprite") as CanvasItem
+	if sprite != null:
+		c = sprite.self_modulate   # a sliced / tiled / filled sprite is drawn by this helper
+	elif ctl is TextureRect:
 		c = ctl.self_modulate if ctl.texture != null else Color(1, 1, 1, 0)
 	elif ctl is RichTextLabel:
 		c = ctl.get_theme_color("default_color") * ctl.self_modulate

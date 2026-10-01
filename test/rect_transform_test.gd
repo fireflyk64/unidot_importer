@@ -12,6 +12,7 @@ const UiText := preload("../runtime/ui_text.gd")
 const Graphic := preload("../runtime/ui_graphic.gd")
 const Selectable := preload("../runtime/selectable.gd")
 const TextFit := preload("../runtime/ui_text_fit.gd")
+const Sprite := preload("../runtime/ui_sprite.gd")
 
 var _checks: int = 0
 var _failed: Array = []
@@ -53,6 +54,7 @@ func _init() -> void:
 	_rich_text()
 	await _text_nodes()
 	_graphics()
+	_sprites()
 	await _selectables()
 	print("[rect_transform_test] %d checks, %d failure(s)" % [_checks, _failed.size()])
 	print("RECT TRANSFORM TESTS " + ("PASSED" if _failed.is_empty() else "FAILED"))
@@ -520,6 +522,39 @@ func _text_nodes() -> void:
 	a.size = Vector2(400, 80)
 	UiText.set_text(a, "x")
 	eq(a.get_theme_font_size("normal_font_size"), 60, "a short text in a rect that is high enough takes the maximum size")
+	# a text higher than its rect: every line is drawn, around the alignment point
+	var o: RichTextLabel = _text(host, {"text": "one<br>two<br>three", "size": 20.0, "overflow": 0}, Vector2(200, 30))
+	o.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	var ofit := Node.new()
+	ofit.name = UiText.HELPER
+	ofit.set_script(TextFit)
+	o.add_child(ofit)
+	await process_frame
+	await process_frame
+	var drawer: RichTextLabel = o.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(drawer != null, "a text that runs out of its rect gets a drawing child")
+	if drawer != null:
+		var content: float = float(o.get_content_height())
+		ok(content > 60.0, "three lines of 20 are higher than the rect of 30: %.0f" % content)
+		near(drawer.size, Vector2(200, content), "the child is as high as the content")
+		near(drawer.position.y, (30.0 - content) * 0.5, "... centred on the rect (middle alignment)")
+		eq(drawer.get_parsed_text(), "one\ntwo\nthree", "... and draws the text")
+		eq(o.visible_characters, 0, "the node itself draws no glyphs")
+		eq(o.get_parsed_text(), "one\ntwo\nthree", "... but still holds the text")
+		ok(drawer.has_meta(RT.META_HELPER) and not RT.logical_children(o).has(drawer), "the child is no object of the scene")
+		o.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+		UiText.layout(o)
+		near(drawer.position.y, 30.0 - content, "bottom alignment: the text grows upwards")
+		Graphic.update(o, {"color": Color(1, 0, 0, 1)})
+		eq(drawer.get_theme_color("default_color"), Color(1, 0, 0, 1), "the colour of the text reaches the child")
+	UiText.set_text(o, "one")
+	ok(o.get_node_or_null(UiText.DRAWER) == null and o.visible_characters == -1, "a text that fits again is drawn by the node itself")
+	o.size = Vector2(200, 10)
+	await process_frame
+	ok(o.get_node_or_null(UiText.DRAWER) != null, "a rect that shrinks below one line: the child is back")
+	var cut: RichTextLabel = _text(host, {"text": "one<br>two<br>three", "size": 20.0, "overflow": 3}, Vector2(200, 30))
+	UiText.layout(cut)
+	ok(cut.get_node_or_null(UiText.DRAWER) == null and cut.clip_contents, "a text that is cut at its rect is not drawn outside")
 	# a hand-built Label has no Unity settings: the plain properties are used
 	var l := Label.new()
 	host.add_child(l)
@@ -682,4 +717,48 @@ func _selectables() -> void:
 	eq(Selectable.colors(toggle)["pressedColor"], Selectable.DEFAULT_COLORS["pressedColor"], "missing colours of the block are Unity's defaults")
 	host.queue_free()
 	await process_frame
+
+
+## Sliced and filled sprites: Unity's geometry (Image.GenerateSlicedSprite, GetAdjustedBorders,
+## GenerateFilledSprite), numbers worked out by hand. Borders are [left, top, right, bottom].
+func _sprites() -> void:
+	var b16: Array = [16, 16, 16, 16]
+	near(Sprite.slice_scale(Vector2(200, 100), b16, 1.0), Vector2(1, 1), "borders at their size in a rect that has room")
+	near(Sprite.slice_scale(Vector2(20, 80), b16, 1.0), Vector2(0.625, 1), "32 units of borders in 20: both shrink to 10")
+	near(Sprite.slice_scale(Vector2(24, 24), b16, 1.0), Vector2(0.75, 0.75), "... on each axis by itself")
+	near(Sprite.slice_scale(Vector2(160, 60), b16, 0.5), Vector2(0.5, 0.5), "pixels per unit multiplier 2: 8 unit borders")
+	near(Sprite.slice_scale(Vector2(10, 10), [10, 10, 10, 10], 0.5), Vector2(0.5, 0.5), "a built-in sprite at 200 pixels per unit: 5 unit borders fit 10 exactly")
+	near(Sprite.slice_scale(Vector2(100, 100), [0, 0, 0, 0], 1.0), Vector2(1, 1), "no borders")
+	var s64 := Vector2(64, 64)
+	near(Sprite.slice_texel(Vector2(8, 8), Vector2(200, 100), s64, b16, 1.0), Vector2(8, 8), "the top-left corner is drawn 1:1")
+	near(Sprite.slice_texel(Vector2(192, 92), Vector2(200, 100), s64, b16, 1.0), Vector2(56, 56), "the bottom-right corner too, from its own end")
+	near(Sprite.slice_texel(Vector2(100, 50), Vector2(200, 100), s64, b16, 1.0), Vector2(32, 32), "the centre is stretched: its middle is the sprite's middle")
+	near(Sprite.slice_texel(Vector2(58, 8), Vector2(200, 100), s64, b16, 1.0), Vector2(24, 8), "the top edge is stretched along x only: 42 of 168 units in is 8 of 32 pixels")
+	near(Sprite.slice_texel(Vector2(5, 40), Vector2(20, 80), s64, b16, 1.0), Vector2(8, 32), "shrunk borders: 5 of 10 units is 8 of 16 pixels")
+	near(Sprite.slice_texel(Vector2(4, 4), Vector2(160, 60), s64, b16, 0.5), Vector2(8, 8), "multiplier 2: 4 units in is 8 pixels in")
+	var r: Array = Sprite.fill_rects(Vector2(128, 32), Vector2(64, 16), 0, 0, 0.25)
+	near(r[0], Rect2(0, 0, 32, 32), "horizontal fill from the left, a quarter: the left quarter of the rect")
+	near(r[1], Rect2(0, 0, 16, 16), "... shows the left quarter of the sprite")
+	r = Sprite.fill_rects(Vector2(128, 32), Vector2(64, 16), 0, 1, 0.75)
+	near(r[0], Rect2(32, 0, 96, 32), "from the right, three quarters")
+	near(r[1], Rect2(16, 0, 48, 16), "... the right three quarters of the sprite")
+	r = Sprite.fill_rects(Vector2(64, 96), Vector2(64, 64), 1, 0, 0.5)
+	near(r[0], Rect2(0, 48, 64, 48), "vertical fill from the bottom, half: the lower half")
+	near(r[1], Rect2(0, 32, 64, 32), "... of the sprite as well")
+	r = Sprite.fill_rects(Vector2(64, 96), Vector2(64, 64), 1, 1, 0.25)
+	near(r[0], Rect2(0, 0, 64, 24), "from the top, a quarter")
+	near(r[1], Rect2(0, 0, 64, 16), "... the upper quarter of the sprite")
+	# the helper is coloured by the graphic's state, the control itself draws nothing
+	var img := TextureRect.new()
+	img.texture = PlaceholderTexture2D.new()
+	var helper := Control.new()
+	helper.name = Sprite.HELPER
+	helper.set_script(Sprite)
+	img.add_child(helper)
+	Graphic.update(img, {"color": Color(0.5, 1, 1, 1), "sprite": {"type": 1, "border": b16, "unit": 1.0, "center": true}})
+	eq(helper.self_modulate, Color(0.5, 1, 1, 1), "a sliced sprite is drawn by the helper in the graphic's colour")
+	eq(img.self_modulate.a, 0.0, "... and the control itself draws nothing")
+	Graphic.set_enabled(img, false)
+	eq(helper.self_modulate.a, 0.0, "a disabled sliced Image draws nothing")
+	img.free()
 

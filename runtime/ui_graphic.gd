@@ -14,7 +14,9 @@ extends RefCounted
 ##   {color: Color, renderer: Color, enabled: bool,
 ##    hidden: bool (drawn by something else or not at all: a Mask that does not show its graphic,
 ##    the text objects of an input field),
-##    texture: Texture2D (the sprite of an Image that is the background of a widget)}
+##    texture: Texture2D (the sprite of an Image that is the background of a widget),
+##    sprite: {...} (an Image that is not simply stretched: sliced, tiled, filled; drawn by a
+##    helper child, see runtime/ui_sprite.gd)}
 
 const META := &"unidot_graphic"
 
@@ -106,6 +108,13 @@ static func apply(ctl: Node) -> void:
 	var c: Color = own * rend
 	if not shown:
 		c.a = 0.0
+	# a sliced / tiled / filled sprite is drawn by a helper child in this colour; the control
+	# itself draws nothing
+	var sprite: CanvasItem = ctl.get_node_or_null(^"UnidotSprite") as CanvasItem
+	if sprite != null:
+		sprite.self_modulate = c
+		sprite.queue_redraw()
+		c = Color(c.r, c.g, c.b, 0.0)
 	if ctl is TextureRect:
 		ctl.self_modulate = c
 	elif ctl is Label:
@@ -114,6 +123,11 @@ static func apply(ctl: Node) -> void:
 	elif ctl is RichTextLabel:
 		ctl.add_theme_color_override("default_color", own)
 		ctl.self_modulate = rend if shown else Color(rend.r, rend.g, rend.b, 0.0)
+		# a text that runs out of its rect is drawn by a child (runtime/ui_text.gd)
+		var drawer: RichTextLabel = ctl.get_node_or_null(^"UnidotTextOverflow") as RichTextLabel
+		if drawer != null:
+			drawer.add_theme_color_override("default_color", own)
+			drawer.self_modulate = ctl.self_modulate
 	elif ctl is Label3D:
 		ctl.modulate = c
 	elif ctl is ColorRect:

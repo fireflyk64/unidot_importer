@@ -15,11 +15,19 @@ extends RefCounted
 ## Font styles are TextMeshPro's: 1 bold, 2 italic, 4 underline, 8 lower case, 16 upper case,
 ## 32 small caps, 64 strikethrough (uGUI's FontStyle has the same two lowest bits).
 ##
-## A text whose size depends on its rect (auto-sizing) has a helper child (runtime/ui_text_fit.gd)
-## that calls `layout` when the rect changes.
+## A text whose drawing depends on its rect (auto-sizing, or text that may run out of the rect)
+## has a helper child (runtime/ui_text_fit.gd) that calls `layout` when the rect changes.
+##
+## Overflow: Unity draws every line of a text that is higher than its rect, around the point
+## its vertical alignment gives (TextMeshPro's overflow mode, uGUI's vertical overflow). A
+## RichTextLabel draws from the top and leaves out the lines that start below its rect, so such
+## a text is drawn by a child label as high as the content ("UnidotTextOverflow"), placed by
+## the alignment, while the node itself keeps the Unity rect and the text.
 
+const RT := preload("./rect_transform.gd")
 const META := &"unidot_text"
 const HELPER := "UnidotText"
+const DRAWER := "UnidotTextOverflow"
 
 ## Regular, bold, italic, bold italic: a family with the metrics of Liberation Sans, which is
 ## TextMeshPro's default font (LiberationSans SDF) and metric-compatible with uGUI's Arial.
@@ -169,11 +177,70 @@ static func set_fonts(n: Node, fonts: Array = FONTS) -> void:
 		n.add_theme_font_override("font", fonts[0])
 
 
-## What depends on the rect: the font size of an auto-sized text. Called when the text or the
-## rect changes (the helper child connects `resized`).
+## Does the drawing of a text with these settings depend on its rect (→ the helper child)?
+static func needs_layout(s: Dictionary) -> bool:
+	return bool(s.get("auto", false)) or int(s.get("overflow", 0)) == 0
+
+
+## What depends on the rect: the font size of an auto-sized text, and whether the text runs out
+## of the rect. Called when the text or the rect changes (the helper child connects `resized`).
 static func layout(n: Node) -> void:
-	if n is RichTextLabel and n.has_meta(META) and bool(n.get_meta(META).get("auto", false)):
+	if not (n is RichTextLabel) or not n.has_meta(META):
+		return
+	var s: Dictionary = n.get_meta(META)
+	if bool(s.get("auto", false)):
 		fit(n)
+	_overflow(n, s)
+
+
+## A text higher than its rect is drawn by a child as high as the content (see above).
+static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
+	var drawer: RichTextLabel = n.get_node_or_null(DRAWER) as RichTextLabel
+	var content: float = 0.0
+	var over: bool = false
+	if int(s.get("overflow", 0)) == 0 and n.is_inside_tree() and n.size.x > 0.0:
+		content = float(n.get_content_height())
+		over = content > n.size.y + 0.5
+	if not over:
+		if drawer != null:
+			n.remove_child(drawer)
+			drawer.queue_free()
+			n.visible_characters = -1
+		return
+	if drawer == null:
+		drawer = RichTextLabel.new()
+		drawer.name = DRAWER
+		drawer.set_meta(RT.META_HELPER, true)
+		drawer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		drawer.bbcode_enabled = true
+		drawer.scroll_active = false
+		drawer.clip_contents = false
+		n.add_child(drawer)
+	for item in ["normal_font", "bold_font", "italics_font", "bold_italics_font"]:
+		if n.has_theme_font_override(item):
+			drawer.add_theme_font_override(item, n.get_theme_font(item))
+	for item in ["normal_font_size", "bold_font_size", "italics_font_size", "bold_italics_font_size", "mono_font_size"]:
+		drawer.add_theme_font_size_override(item, n.get_theme_font_size(item))
+	for item in ["default_color", "font_outline_color", "font_shadow_color"]:
+		if n.has_theme_color_override(item):
+			drawer.add_theme_color_override(item, n.get_theme_color(item))
+	for item in ["outline_size", "shadow_offset_x", "shadow_offset_y", "line_separation"]:
+		if n.has_theme_constant_override(item):
+			drawer.add_theme_constant_override(item, n.get_theme_constant(item))
+	drawer.autowrap_mode = n.autowrap_mode
+	drawer.horizontal_alignment = n.horizontal_alignment
+	drawer.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	drawer.self_modulate = n.self_modulate
+	drawer.text = n.text
+	var y: float = 0.0
+	match n.vertical_alignment:
+		VERTICAL_ALIGNMENT_CENTER:
+			y = (n.size.y - content) * 0.5
+		VERTICAL_ALIGNMENT_BOTTOM:
+			y = n.size.y - content
+	drawer.position = Vector2(0.0, y)
+	drawer.size = Vector2(n.size.x, content)
+	n.visible_characters = 0   # the node keeps the text (and measures it) but does not draw it
 
 
 ## Auto-sizing (TextMeshPro's enableAutoSizing, uGUI's best fit): the largest size between `min`

@@ -26,6 +26,7 @@ const scroll_rect_script := preload("./runtime/scroll_rect.gd")
 const dropdown_script := preload("./runtime/dropdown.gd")
 const selectable_script := preload("./runtime/selectable.gd")
 const text_fit_script := preload("./runtime/ui_text_fit.gd")
+const sprite_script := preload("./runtime/ui_sprite.gd")
 const Graphic := preload("./runtime/ui_graphic.gd")
 const UiText := preload("./runtime/ui_text.gd")
 
@@ -392,6 +393,12 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 		RT.build_island(holder, ctl, v, state.owner)
 	else:
 		_build_screen_canvas(holder, ctl, v, canvas.keys, kind_keys.get("CanvasScaler", {}), state.owner)
+	# sprites are measured in canvas units through this (CanvasScaler.referencePixelsPerUnit)
+	var scaler_keys: Dictionary = kind_keys.get("CanvasScaler", {})
+	if scaler_keys.has("m_ReferencePixelsPerUnit") and not is_equal_approx(_to_float(scaler_keys["m_ReferencePixelsPerUnit"]), 100.0):
+		var ccfg: Dictionary = holder.get_meta(RT.META_CANVAS)
+		ccfg["reference_ppu"] = _to_float(scaler_keys["m_ReferencePixelsPerUnit"])
+		holder.set_meta(RT.META_CANVAS, ccfg)
 	holder.visible = active
 	stats["canvases"] += 1
 	return holder
@@ -590,20 +597,32 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 	var keys: Dictionary = obj.keys
 	match kind:
 		"Image", "RawImage":
-			var tex: Texture2D = _sprite_texture(obj.get_ref(keys, "m_Sprite" if kind == "Image" else "m_Texture"), obj)
 			# colour, CanvasRenderer colour and enabled are applied by runtime/ui_graphic.gd
 			var graphic: Dictionary = {"color": keys["m_Color"] if keys.get("m_Color") is Color else Color.WHITE, "enabled": _to_int(keys.get("m_Enabled", 1)) != 0}
+			var info: Dictionary = _sprite(obj.get_ref(keys, "m_Sprite"), obj) if kind == "Image" else {"texture": _sprite_texture(obj.get_ref(keys, "m_Texture"), obj)}
+			var tex: Texture2D = info.get("texture")
+			var drawn: Dictionary = _sprite_drawing(keys, info, ctl) if kind == "Image" and tex != null else {}
 			if ctl is TextureRect:
-				# Unity draws an Image without a sprite as a solid rectangle in its colour, and the
-				# built-in UI sprites (UISprite, Background, Knob ...) are not part of any package:
-				# both get a white texture. The colour tints this graphic only, not its children.
+				# Unity draws an Image without a sprite as a solid rectangle in its colour: a white
+				# texture. The colour tints this graphic only, not its children.
 				ctl.texture = tex if tex != null else _white_texture()
 				if tex == null:
 					ctl.set_meta("unidot_no_sprite", true)
-				if kind == "Image" and _to_int(keys.get("m_PreserveAspect", 0)) != 0:
+				if kind == "Image" and _to_int(keys.get("m_PreserveAspect", 0)) != 0 and drawn.is_empty():
 					ctl.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 			elif tex != null:
 				graphic["texture"] = tex   # the background of a widget
+			if kind == "Image" and tex != null:
+				# canvas units per sprite pixel, and the size the Image asks for in a layout: its
+				# sprite's, or the borders of a sliced or tiled one (Image.preferredWidth)
+				var unit: float = _sprite_unit(info, ctl)
+				var edge: Array = info.get("border", [0, 0, 0, 0])
+				graphic["unit"] = unit
+				graphic["preferred"] = Vector2(float(edge[0]) + float(edge[2]), float(edge[1]) + float(edge[3])) * unit if _to_int(keys.get("m_Type", 0)) in [1, 2] else Vector2(tex.get_size()) * unit
+			if not drawn.is_empty():
+				# sliced, tiled or filled: drawn by a helper child (runtime/ui_sprite.gd)
+				graphic["sprite"] = drawn
+				_add_sprite_helper(ctl, state.owner if state.owner != null else ctl)
 			Graphic.update(ctl, graphic)
 		"Text":
 			_configure_text(ctl, keys, obj, state)
@@ -800,6 +819,119 @@ func _input_font_size(ctl: Control, keys: Dictionary, obj: RefCounted) -> int:
 	return maxi(int(size), 1)
 
 
+## Unity's built-in UI sprites (the default look of buttons, toggles, sliders ...): no package
+## ships them. Stand-ins of the same size, border and pixels per unit come with the run-time
+## scripts (runtime/sprites).
+const BUILTIN_GUID := "0000000000000000f000000000000000"
+const BUILTIN_SPRITES := {
+	10901: ["checkmark", 0], 10905: ["ui_sprite", 10], 10907: ["background", 10], 10911: ["input_field_background", 10],
+	10913: ["knob", 0], 10915: ["dropdown_arrow", 0], 10917: ["ui_mask", 10],
+}
+const BUILTIN_PPU := 200.0
+
+var _builtin_cache: Dictionary = {}
+
+
+## A sprite reference → {texture, border: [left, top, right, bottom] in sprite pixels,
+## ppu: sprite pixels per unit}. The texture is an AtlasTexture for a sprite of a sheet.
+func _sprite(ref: Array, obj: RefCounted) -> Dictionary:
+	if ref.size() < 4 or ref[1] == 0:
+		return {}
+	if str(ref[2]) == BUILTIN_GUID:
+		if not BUILTIN_SPRITES.has(ref[1]):
+			return {}
+		var entry: Array = BUILTIN_SPRITES[ref[1]]
+		if not _builtin_cache.has(entry[0]):
+			var path: String = (get_script() as Script).resource_path.get_base_dir() + "/runtime/sprites/" + str(entry[0]) + ".tres"
+			_builtin_cache[entry[0]] = load(path) if ResourceLoader.exists(path) else null
+		if _builtin_cache[entry[0]] == null:
+			return {}
+		var b: int = entry[1]
+		return {"texture": _builtin_cache[entry[0]], "border": [b, b, b, b], "ppu": BUILTIN_PPU}
+	var tex: Texture2D = _sprite_texture(ref, obj)
+	if tex == null:
+		return {}
+	var info: Dictionary = {"texture": tex, "border": [0, 0, 0, 0], "ppu": 100.0}
+	var tm = obj.meta.lookup_meta(ref)
+	var ik: Dictionary = tm.importer_keys if tm != null and tm.get("importer_keys") is Dictionary else {}
+	if ik.has("spritePixelsToUnits"):
+		info["ppu"] = maxf(_to_float(ik["spritePixelsToUnits"]), 0.0001)
+	var border = ik.get("spriteBorder")
+	if _to_int(ik.get("spriteMode", 1)) == 2:
+		# a sheet: the sprite is named by its file id
+		var sheet = ik.get("spriteSheet")
+		for sp in (sheet.get("sprites", []) if sheet is Dictionary else []):
+			if not (sp is Dictionary) or _to_int(sp.get("internalID", 0)) != ref[1]:
+				continue
+			border = sp.get("border")
+			var r = sp.get("rect")
+			if r is Dictionary:
+				r = Rect2(_to_float(r.get("x", 0)), _to_float(r.get("y", 0)), _to_float(r.get("width", 0)), _to_float(r.get("height", 0)))
+			if r is Rect2 and r.size.x > 0.0 and r.size.y > 0.0:
+				# Unity's sprite rects have their origin at the bottom-left of the texture
+				var atlas := AtlasTexture.new()
+				atlas.atlas = tex
+				atlas.region = Rect2(r.position.x, float(tex.get_height()) - r.position.y - r.size.y, r.size.x, r.size.y)
+				info["texture"] = atlas
+			break
+	# Unity's border is left, bottom, right, top
+	if border is Quaternion:
+		info["border"] = [border.x, border.w, border.z, border.y]
+	elif border is Vector4:
+		info["border"] = [border.x, border.w, border.z, border.y]
+	return info
+
+
+## The pixels per unit of the canvas `ctl` is on (CanvasScaler.referencePixelsPerUnit).
+func _reference_ppu(ctl: Node) -> float:
+	var cur: Node = ctl
+	while cur != null:
+		if cur.has_meta(RT.META_CANVAS):
+			return float((cur.get_meta(RT.META_CANVAS) as Dictionary).get("reference_ppu", 100.0))
+		cur = cur.get_parent()
+	return 100.0
+
+
+## Canvas units per sprite pixel of an Image (1 / Image.pixelsPerUnit).
+func _sprite_unit(info: Dictionary, ctl: Control) -> float:
+	return _reference_ppu(ctl) / maxf(float(info.get("ppu", 100.0)), 0.0001)
+
+
+## How an Image draws its sprite when it is not simply stretched (→ `sprite` of the graphic
+## metadata, runtime/ui_sprite.gd); empty for a simple image.
+func _sprite_drawing(keys: Dictionary, info: Dictionary, ctl: Control) -> Dictionary:
+	var unit: float = _sprite_unit(info, ctl) / maxf(_to_float(keys.get("m_PixelsPerUnitMultiplier", 1.0)), 0.01)
+	var border: Array = info.get("border", [0, 0, 0, 0])
+	var has_border: bool = false
+	for v in border:
+		if float(v) > 0.0:
+			has_border = true
+	match _to_int(keys.get("m_Type", 0)):
+		1:
+			if has_border:
+				return {"type": 1, "border": border, "unit": unit, "center": _to_int(keys.get("m_FillCenter", 1)) != 0}
+		2:
+			return {"type": 2, "unit": unit}
+		3:
+			return {"type": 3, "method": _to_int(keys.get("m_FillMethod", 4)), "origin": _to_int(keys.get("m_FillOrigin", 0)), "amount": _to_float(keys.get("m_FillAmount", 1.0)), "clockwise": _to_int(keys.get("m_FillClockwise", 1)) != 0}
+	return {}
+
+
+func _add_sprite_helper(ctl: Control, owner: Node) -> void:
+	if ctl.get_node_or_null(sprite_script.HELPER) != null:
+		return
+	var helper := Control.new()
+	helper.name = sprite_script.HELPER
+	helper.set_meta(RT.META_HELPER, true)
+	helper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	helper.show_behind_parent = true   # a Button draws its own text over it
+	helper.set_script(sprite_script)
+	ctl.add_child(helper)
+	ctl.move_child(helper, 0)
+	helper.set_anchors_preset(Control.PRESET_FULL_RECT)
+	helper.owner = owner
+
+
 func _sprite_texture(ref: Array, obj: RefCounted) -> Texture2D:
 	if ref.size() < 4 or ref[1] == 0:
 		return null
@@ -895,7 +1027,7 @@ func _text_control(ctl: Control, settings: Dictionary, color: Color, enabled: bo
 		ctl.set_meta(UiText.META, settings)
 		UiText.render(ctl)
 		Graphic.update(ctl, {"color": color, "enabled": enabled})
-		if bool(settings.get("auto", false)):
+		if UiText.needs_layout(settings):
 			_ensure_helper(ctl, state, UiText.HELPER, text_fit_script)
 	elif ctl is Button:
 		# a text on the object of a button itself
@@ -1060,12 +1192,24 @@ func _override_component(kind: String, ctl: Control, uprops: Dictionary, obj: Re
 				graphic["enabled"] = _to_int(uprops["m_Enabled"]) != 0
 			var tex_key: String = "m_Sprite" if kind == "Image" else "m_Texture"
 			if typeof(uprops.get(tex_key)) == TYPE_ARRAY:
-				var tex: Texture2D = _sprite_texture(uprops[tex_key], obj)
+				var info: Dictionary = _sprite(uprops[tex_key], obj) if kind == "Image" else {"texture": _sprite_texture(uprops[tex_key], obj)}
+				var tex: Texture2D = info.get("texture")
 				if ctl is TextureRect:
 					ctl.texture = tex if tex != null else _white_texture()
 					ctl.set_meta("unidot_no_sprite", tex == null)
 				else:
 					graphic["texture"] = tex
+				# (the way the sprite is drawn - sliced, filled - stays that of the prefab, with
+				# the new sprite's border)
+				var old: Dictionary = Graphic.state(ctl).get("sprite", {})
+				if not old.is_empty() and info.has("border"):
+					var changed: Dictionary = old.duplicate()
+					changed["border"] = info["border"]
+					graphic["sprite"] = changed
+			if uprops.has("m_FillAmount") and not (Graphic.state(ctl).get("sprite", {}) as Dictionary).is_empty():
+				var filled: Dictionary = (graphic.get("sprite", Graphic.state(ctl)["sprite"]) as Dictionary).duplicate()
+				filled["amount"] = _to_float(uprops["m_FillAmount"])
+				graphic["sprite"] = filled
 			if ctl is TextureRect and uprops.has("m_PreserveAspect"):
 				ctl.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED if _to_int(uprops["m_PreserveAspect"]) != 0 else TextureRect.STRETCH_SCALE
 			if not graphic.is_empty():
@@ -1202,7 +1346,7 @@ func _override_text(tmp: bool, ctl: Control, uprops: Dictionary) -> void:
 			ctl.vertical_alignment = [VERTICAL_ALIGNMENT_TOP, VERTICAL_ALIGNMENT_CENTER, VERTICAL_ALIGNMENT_BOTTOM][clampi(int(align / 3), 0, 2)]
 		if not changes.is_empty() and ctl.has_meta(UiText.META):
 			UiText.update(ctl, changes)
-			if bool(changes.get("auto", false)):
+			if UiText.needs_layout(UiText.settings(ctl)):
 				_add_helper(ctl, UiText.HELPER, text_fit_script, _scene_root(ctl))
 	var color_key: String = "m_fontColor" if tmp else "m_Color"
 	var graphic: Dictionary = {}
