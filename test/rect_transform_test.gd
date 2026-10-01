@@ -1,12 +1,17 @@
 # This file is part of Unidot Importer. See LICENSE.txt for full MIT license.
 # SPDX-License-Identifier: MIT
 extends SceneTree
-## Unit tests for runtime/rect_transform.gd (no importer, no scripting layer):
+## Unit tests for runtime/rect_transform.gd and the modules that draw Unity UI (ui_text.gd,
+## ui_graphic.gd, selectable.gd), without importer or scripting layer:
 ##   godot --headless --path <project with this addon> -s addons/unidot_importer/test/rect_transform_test.gd
 ## Expected numbers are Unity's, worked out by hand from the RectTransform rules.
 
 const RT := preload("../runtime/rect_transform.gd")
 const Scaler := preload("../runtime/canvas_scaler.gd")
+const UiText := preload("../runtime/ui_text.gd")
+const Graphic := preload("../runtime/ui_graphic.gd")
+const Selectable := preload("../runtime/selectable.gd")
+const TextFit := preload("../runtime/ui_text_fit.gd")
 
 var _checks: int = 0
 var _failed: Array = []
@@ -45,6 +50,10 @@ func _init() -> void:
 	await _promotion()
 	await _nested_canvas()
 	await _screen_canvas()
+	_rich_text()
+	await _text_nodes()
+	_graphics()
+	await _selectables()
 	print("[rect_transform_test] %d checks, %d failure(s)" % [_checks, _failed.size()])
 	print("RECT TRANSFORM TESTS " + ("PASSED" if _failed.is_empty() else "FAILED"))
 	quit(0 if _failed.is_empty() else 1)
@@ -427,3 +436,249 @@ func _screen_canvas() -> void:
 	ok(RT.holder_of(img) == null, "a tilted control on a screen canvas stays flat")
 	canvas.queue_free()
 	await process_frame
+
+
+func eq(a, b, what: String) -> void:
+	ok(typeof(a) == typeof(b) and a == b, "%s: got %s, expected %s" % [what, str(a), str(b)])
+
+
+## Unity rich text → BBCode and the characters shown.
+func _rich_text() -> void:
+	eq(UiText.to_bbcode("plain", true, 0, 20.0), "plain", "plain text is unchanged")
+	eq(UiText.to_bbcode("<b>B</b><i>I</i><u>U</u><s>S</s>", true, 0, 20.0), "[b]B[/b][i]I[/i][u]U[/u][s]S[/s]", "bold, italic, underline, strikethrough")
+	eq(UiText.to_bbcode("<color=#FFD700>gold</color>", true, 0, 20.0), "[color=#FFD700]gold[/color]", "colour by hex")
+	eq(UiText.to_bbcode("<color=red>r</color><color=green>g</color>", true, 0, 20.0), "[color=#ff0000]r[/color][color=#00ff00]g[/color]", "TextMeshPro colour names")
+	eq(UiText.to_bbcode("<color=green>g</color>", true, 0, 20.0, false), "[color=#008000]g[/color]", "uGUI's green is darker")
+	eq(UiText.to_bbcode("<#00ff00>short</color>", true, 0, 20.0), "[color=#00ff00]short[/color]", "TextMeshPro's short colour tag")
+	eq(UiText.to_bbcode("<size=13>s</size>", true, 0, 20.0), "[font_size=13]s[/font_size]", "absolute size")
+	eq(UiText.to_bbcode("<size=150%>s</size><size=+4>t</size><size=2em>u</size>", true, 0, 20.0), "[font_size=30]s[/font_size][font_size=24]t[/font_size][font_size=40]u[/font_size]", "relative sizes")
+	eq(UiText.to_bbcode("<size=13>LocalPlayer", true, 0, 20.0), "[font_size=13]LocalPlayer[/font_size]", "an unclosed tag is closed")
+	eq(UiText.to_bbcode("a<br>b", true, 0, 20.0), "a\nb", "line break")
+	eq(UiText.to_bbcode("1<<2 <3 a<b", true, 0, 20.0), "1<<2 <3 a<b", "angle brackets that are no tags are text")
+	eq(UiText.to_bbcode("<winner> x", true, 0, 20.0), "<winner> x", "an unknown tag is text")
+	eq(UiText.to_bbcode("a[0] [b]", true, 0, 20.0), "a[lb]0] [lb]b]", "square brackets are not BBCode")
+	eq(UiText.to_bbcode("<sprite name=\"x\">a<voffset=1em>b</voffset><link=\"id\">c</link>", true, 0, 20.0), "abc", "tags without a counterpart are dropped")
+	eq(UiText.to_bbcode("<noparse><b>x</b></noparse>", true, 0, 20.0), "<b>x</b>", "noparse")
+	eq(UiText.to_bbcode("<b>x</b>", false, 0, 20.0), "<b>x</b>", "rich text off: tags are text")
+	eq(UiText.to_bbcode("x", true, UiText.BOLD | UiText.ITALIC, 20.0), "[b][i]x[/i][/b]", "bold italic style")
+	eq(UiText.to_bbcode("Ab c", true, UiText.UPPER, 20.0), "AB C", "upper case style")
+	eq(UiText.to_bbcode("Ab C", true, UiText.LOWER, 20.0), "ab c", "lower case style")
+	eq(UiText.to_bbcode("Ab", true, UiText.SMALLCAPS, 20.0), "A[font_size=16]B[/font_size]", "small caps: capitals at 80 %")
+	eq(UiText.to_bbcode("a<uppercase>b</uppercase>c", true, 0, 20.0), "aBc", "uppercase tag")
+	eq(UiText.to_bbcode("<u>x</u> <b>y</b>", true, 0, 20.0, false), "<u>x</u> [b]y[/b]", "uGUI knows only b, i, size, color")
+	eq(UiText.plain("<b>Bold</b> <color=#FFD700>gold</color> 1<<2 <unknown>", true, 0), "Bold gold 1<<2 <unknown>", "plain text of rich text")
+	eq(UiText.plain("Small Caps", true, 35), "SMALL CAPS", "plain text of small caps")
+	eq(UiText.plain("a<br>b", true, 0), "a\nb", "plain text keeps line breaks")
+
+
+func _text(parent: Node, settings: Dictionary, size: Vector2) -> RichTextLabel:
+	var t := RichTextLabel.new()
+	t.name = "Text"
+	t.size = size
+	UiText.set_fonts(t)
+	var s: Dictionary = {"tmp": true}
+	s.merge(settings, true)
+	t.set_meta(UiText.META, s)
+	parent.add_child(t)
+	UiText.render(t)
+	return t
+
+
+## Text nodes: what is rendered, what a setter changes, auto-sizing.
+func _text_nodes() -> void:
+	var host := Control.new()
+	root.add_child(host)
+	var t: RichTextLabel = _text(host, {"text": "<b>Hi</b> there", "size": 20.0}, Vector2(300, 40))
+	eq(t.text, "[b]Hi[/b] there", "the text is rendered as BBCode")
+	eq(t.get_parsed_text(), "Hi there", "... and shows no tags")
+	eq(UiText.text(t), "<b>Hi</b> there", "the Unity string is kept")
+	eq(t.get_theme_font_size("normal_font_size"), 20, "font size")
+	ok(not t.clip_contents, "TextMeshPro's overflow mode draws outside the rect")
+	UiText.set_text(t, "<size=13>LocalPlayer")
+	eq(t.get_parsed_text(), "LocalPlayer", "a text set later goes through the same conversion")
+	eq(UiText.text(t), "<size=13>LocalPlayer", "... and reads back as it was set")
+	UiText.set_font_size(t, 31.6)
+	eq(t.get_theme_font_size("normal_font_size"), 32, "font size setter")
+	near(UiText.font_size(t), 31.6, "... keeps the exact Unity value")
+	ok(t.get_theme_font("normal_font") == UiText.FONTS[0] and t.get_theme_font("bold_font") == UiText.FONTS[1], "the default family is set")
+	# auto-sizing: the largest size that fits
+	var a: RichTextLabel = _text(host, {"text": "Auto sized text that has to shrink", "size": 60.0, "auto": true, "min": 8.0, "max": 60.0}, Vector2(200, 30))
+	var fit := Node.new()
+	fit.name = UiText.HELPER
+	fit.set_script(TextFit)
+	a.add_child(fit)
+	await process_frame
+	await process_frame
+	var fitted: int = a.get_theme_font_size("normal_font_size")
+	ok(fitted >= 8 and fitted < 60, "an auto-sized text shrinks: %d" % fitted)
+	ok(a.get_content_height() <= 30.5 and a.get_content_width() <= 200.5, "... until it fits its rect: %d x %d" % [a.get_content_width(), a.get_content_height()])
+	a.size = Vector2(400, 60)
+	await process_frame
+	await process_frame
+	ok(a.get_theme_font_size("normal_font_size") > fitted, "... and grows with the rect: %d" % a.get_theme_font_size("normal_font_size"))
+	a.size = Vector2(400, 80)
+	UiText.set_text(a, "x")
+	eq(a.get_theme_font_size("normal_font_size"), 60, "a short text in a rect that is high enough takes the maximum size")
+	# a hand-built Label has no Unity settings: the plain properties are used
+	var l := Label.new()
+	host.add_child(l)
+	UiText.set_text(l, "<b>raw</b>")
+	eq(l.text, "<b>raw</b>", "a Label without settings gets the string as it is")
+	eq(UiText.text(l), "<b>raw</b>", "... and gives it back")
+	# TextMeshPro in 3D: the font size is in tenths of a unit
+	var l3 := Label3D.new()
+	l3.font_size = 64
+	l3.set_meta(UiText.META, {"text": "<b>W</b>inner", "tmp": true, "size": 2.0, "style": UiText.UPPER})
+	host.add_child(l3)
+	UiText.render(l3)
+	eq(l3.text, "WINNER", "3D text shows no tags and is cased")
+	near(l3.pixel_size, 0.2 / 64.0, "3D text: font size 2 is an em of 0.2 units", 1e-6)
+	host.queue_free()
+	await process_frame
+
+
+## Graphic colour × CanvasRenderer colour × enabled.
+func _graphics() -> void:
+	var img := TextureRect.new()
+	img.texture = PlaceholderTexture2D.new()
+	Graphic.update(img, {"color": Color(0.5, 1, 1, 1)})
+	eq(img.self_modulate, Color(0.5, 1, 1, 1), "an image is tinted by its colour")
+	Graphic.set_renderer_color(img, Color(1, 0.5, 1, 0.5))
+	eq(img.self_modulate, Color(0.5, 0.5, 1, 0.5), "... times the CanvasRenderer colour")
+	eq(Graphic.color(img), Color(0.5, 1, 1, 1), "the graphic's own colour is kept apart")
+	Graphic.set_enabled(img, false)
+	eq(img.self_modulate.a, 0.0, "a disabled graphic draws nothing")
+	ok(img.visible, "... but its object (and children) stay")
+	ok(not Graphic.enabled(img), "enabled reads back")
+	Graphic.set_enabled(img, true)
+	eq(img.self_modulate, Color(0.5, 0.5, 1, 0.5), "enabled again: the colour is back")
+	Graphic.set_renderer_alpha(img, 0.0)
+	eq(Graphic.drawn_color(img).a, 0.0, "CanvasRenderer alpha 0")
+	img.free()
+	# without metadata the control's own state is the start
+	var plain := TextureRect.new()
+	plain.self_modulate = Color(1, 0, 0, 1)
+	Graphic.set_enabled(plain, false)
+	Graphic.set_enabled(plain, true)
+	eq(plain.self_modulate, Color(1, 0, 0, 1), "a hand-built image keeps its colour through enabled")
+	plain.free()
+	var text := RichTextLabel.new()
+	Graphic.update(text, {"color": Color(1, 1, 0, 1)})
+	eq(text.get_theme_color("default_color"), Color(1, 1, 0, 1), "a text's colour is its default colour")
+	Graphic.set_renderer_alpha(text, 0.25)
+	near(text.self_modulate.a, 0.25, "... faded by the CanvasRenderer alpha")
+	text.free()
+	# an Image on a widget is its background
+	var button := Button.new()
+	Graphic.update(button, {"color": Color(0.2, 0.4, 0.6, 1)})
+	var box: StyleBox = button.get_theme_stylebox("normal")
+	ok(box is StyleBoxFlat and (box as StyleBoxFlat).bg_color == Color(0.2, 0.4, 0.6, 1), "a button's image is its style box")
+	ok(button.get_theme_stylebox("hover") == box and button.get_theme_stylebox("pressed") == box, "... in every state (Unity tints by the CanvasRenderer)")
+	Graphic.set_renderer_color(button, Color(1, 1, 1, 0))
+	ok(button.get_theme_stylebox("normal") is StyleBoxEmpty, "normal colour with alpha 0: the button draws no background")
+	Graphic.set_renderer_color(button, Color(0.5, 0.5, 0.5, 1))
+	ok(button.get_theme_stylebox("normal") != box and (button.get_theme_stylebox("normal") as StyleBoxFlat).bg_color == Color(0.1, 0.2, 0.3, 1), "a tint makes a new box (boxes of a saved scene are shared by its instances)")
+	Graphic.set_enabled(button, false)
+	ok(button.get_theme_stylebox("normal") is StyleBoxEmpty, "a disabled Image on a button draws nothing")
+	button.free()
+
+
+func _slider(parent: Control, direction: int, value: float, lo: float = 0.0, hi: float = 1.0) -> Array:
+	var s: Range = VSlider.new() if direction >= 2 else HSlider.new()
+	s.name = "Slider"
+	s.min_value = lo
+	s.max_value = hi
+	s.step = 0.0
+	s.value = value
+	parent.add_child(s)
+	_rt(s, {"size_delta": Vector2(20, 160) if direction >= 2 else Vector2(160, 20)})
+	var area := Control.new()
+	area.name = "Area"
+	s.add_child(area)
+	_rt(area, {"anchor_min": Vector2(0, 0), "anchor_max": Vector2(1, 1), "size_delta": Vector2.ZERO})
+	var fill: TextureRect = _image(area, "Fill", {"anchor_min": Vector2(0, 0), "anchor_max": Vector2(0.9, 0.8), "size_delta": Vector2(10, 0)})
+	var handle: TextureRect = _image(area, "Handle", {"anchor_min": Vector2(0.9, 0.1), "anchor_max": Vector2(0.9, 0.9), "size_delta": Vector2(20, 0)})
+	s.set_meta(Selectable.META, {"direction": direction, "fill": s.get_path_to(fill), "handle": s.get_path_to(handle), "target": s.get_path_to(handle),
+		"colors": {"normalColor": Color(1, 1, 1, 1), "disabledColor": Color(0.5, 0.5, 0.5, 0.5), "pressedColor": Color(0.2, 0.2, 0.2, 1)}})
+	return [s, fill, handle]
+
+
+## Selectables: Slider.UpdateVisuals, the Toggle's check mark, colour tints.
+func _selectables() -> void:
+	var host := Control.new()
+	host.size = Vector2(400, 400)
+	root.add_child(host)
+	# the importer's static pass: no helper node, nothing running
+	var a: Array = _slider(host, 0, 0.25)
+	Selectable.refresh_static(a[0])
+	near(RT.anchor_max(a[1]), Vector2(0.25, 1), "left to right: the fill ends at the value")
+	near(RT.anchor_min(a[1]), Vector2(0, 0), "... and starts at the start")
+	near(RT.size_delta(a[1]), Vector2(10, 0), "... keeping its size delta")
+	near(RT.anchor_min(a[2]), Vector2(0.25, 0), "the handle is anchored at the value")
+	near(RT.anchor_max(a[2]), Vector2(0.25, 1), "... on the whole other axis")
+	a = _slider(host, 1, 0.25)
+	Selectable.refresh_static(a[0])
+	near(RT.anchor_min(a[1]), Vector2(0.75, 0), "right to left: the fill starts at 1 - value")
+	near(RT.anchor_max(a[1]), Vector2(1, 1), "... and ends at the end")
+	near(RT.anchor_min(a[2]), Vector2(0.75, 0), "right to left handle")
+	a = _slider(host, 2, 0.6)
+	Selectable.refresh_static(a[0])
+	near(RT.anchor_max(a[1]), Vector2(1, 0.6), "bottom to top fill")
+	near(RT.anchor_min(a[2]), Vector2(0, 0.6), "bottom to top handle")
+	a = _slider(host, 3, 0.6)
+	Selectable.refresh_static(a[0])
+	near(RT.anchor_min(a[1]), Vector2(0, 0.4), "top to bottom fill")
+	near(RT.anchor_max(a[2]), Vector2(1, 0.4), "top to bottom handle")
+	a = _slider(host, 0, 0.0, -10.0, 30.0)
+	Selectable.refresh_static(a[0])
+	near(RT.anchor_max(a[1]), Vector2(0.25, 1), "the value is normalized by the range")
+	# running: the helper follows the value and the state
+	var helper := Node.new()
+	helper.name = Selectable.HELPER
+	helper.set_script(Selectable)
+	a[0].add_child(helper)
+	await process_frame
+	(a[0] as Range).value = 10.0
+	near(RT.anchor_max(a[1]), Vector2(0.5, 1), "a value set later moves the fill")
+	near(RT.anchor_min(a[2]), Vector2(0.5, 0), "... and the handle")
+	await process_frame
+	near(a[2].size.x, 20.0, "the handle keeps its width")
+	near(a[2].position.x + 10.0, 80.0, "... centred on the value (in a 160 wide area)", 0.01)
+	eq(Graphic.renderer_color(a[2]), Color(1, 1, 1, 1), "normal colour on the target graphic")
+	(a[0] as Slider).editable = false
+	Selectable.refresh_host(a[0])
+	eq(Graphic.renderer_color(a[2]), Color(0.5, 0.5, 0.5, 0.5), "disabled colour when not interactable")
+	(a[0] as Slider).editable = true
+	Selectable.apply(a[0], "pressed")
+	eq(Graphic.renderer_color(a[2]), Color(0.2, 0.2, 0.2, 1), "pressed colour")
+	# toggle
+	var toggle := Button.new()
+	toggle.toggle_mode = true
+	host.add_child(toggle)
+	var back: TextureRect = _image(toggle, "Background", {"size_delta": Vector2(20, 20)})
+	var mark: TextureRect = _image(back, "Checkmark", {"size_delta": Vector2(16, 16)})
+	Graphic.update(mark, {"color": Color(0.1, 0.1, 0.1, 1)})
+	toggle.set_meta(Selectable.META, {"graphic": toggle.get_path_to(mark), "target": toggle.get_path_to(back), "colors": {"normalColor": Color(1, 1, 1, 0), "colorMultiplier": 1.0}})
+	Selectable.refresh_static(toggle)
+	eq(mark.self_modulate.a, 0.0, "the check mark of a toggle that is off is not drawn")
+	eq(back.self_modulate.a, 0.0, "a normal colour with alpha 0 hides the target graphic")
+	var thelper := Node.new()
+	thelper.name = Selectable.HELPER
+	thelper.set_script(Selectable)
+	toggle.add_child(thelper)
+	toggle.button_pressed = true
+	eq(mark.self_modulate, Color(0.1, 0.1, 0.1, 1), "isOn shows the check mark")
+	toggle.set_pressed_no_signal(false)
+	Selectable.refresh_host(toggle)
+	eq(mark.self_modulate.a, 0.0, "... and off without a signal, refreshed by the caller")
+	# colour multiplier
+	var cfg: Dictionary = toggle.get_meta(Selectable.META).duplicate(true)
+	cfg["colors"] = {"normalColor": Color(0.4, 0.4, 0.4, 1), "colorMultiplier": 2.0}
+	toggle.set_meta(Selectable.META, cfg)
+	Selectable.refresh_host(toggle)
+	near(Graphic.renderer_color(back).r, 0.8, "the colour multiplier")
+	eq(Graphic.renderer_color(back).a, 1.0, "... clamped")
+	eq(Selectable.colors(toggle)["pressedColor"], Selectable.DEFAULT_COLORS["pressedColor"], "missing colours of the block are Unity's defaults")
+	host.queue_free()
+	await process_frame
+

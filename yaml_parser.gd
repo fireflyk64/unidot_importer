@@ -236,9 +236,11 @@ func parse_value(line: String, keyname: String, parent_key: String) -> Variant:
 		j.parse(line)
 		return j.get_data()
 	elif line.begins_with("'"):
-		var s: String = line.substr(1, len(line) - 1)
-		str(str(typeof(s)) + "/" + str(line))
-		return s.replace("''", "")
+		# a single-quoted scalar: the closing quote goes, a doubled quote is one quote
+		var s: String = line.substr(1)
+		if s.ends_with("'"):
+			s = s.substr(0, len(s) - 1)
+		return s.replace("''", "'")
 	else:
 		return line
 

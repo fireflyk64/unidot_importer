@@ -24,6 +24,10 @@ const canvas_scaler_script := preload("./runtime/canvas_scaler.gd")
 const layout_group_script := preload("./runtime/layout_group.gd")
 const scroll_rect_script := preload("./runtime/scroll_rect.gd")
 const dropdown_script := preload("./runtime/dropdown.gd")
+const selectable_script := preload("./runtime/selectable.gd")
+const text_fit_script := preload("./runtime/ui_text_fit.gd")
+const Graphic := preload("./runtime/ui_graphic.gd")
+const UiText := preload("./runtime/ui_text.gd")
 
 ## Unity UI / TextMeshPro component scripts by GUID.
 const UI_COMPONENTS := {
@@ -95,13 +99,8 @@ func _text_mesh_3d(obj: RefCounted, state: RefCounted, node: Node3D) -> void:
 	var keys: Dictionary = obj.keys
 	var label := Label3D.new()
 	label.name = "TextMeshPro"
-	label.text = _strip_tags(str(keys.get("m_text", "")) if keys.get("m_text") != null else "")
-	var size: float = maxf(_to_float(keys.get("m_fontSize", 36.0)), 0.01)
 	label.font_size = 64
 	label.outline_size = 0
-	label.pixel_size = size / 10.0 / 64.0
-	if keys.get("m_fontColor") is Color:
-		label.modulate = keys["m_fontColor"]
 	var rect: Vector2 = Vector2.ZERO
 	var pivot: Vector2 = Vector2(0.5, 0.5)
 	var go = obj.gameObject
@@ -134,19 +133,15 @@ func _text_mesh_3d(obj: RefCounted, state: RefCounted, node: Node3D) -> void:
 			y = 0.0
 		_:
 			label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	if rect.x > 0.0 and _to_int(keys.get("m_enableWordWrapping", 0)) != 0:
-		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		label.width = rect.x / label.pixel_size
+	var settings: Dictionary = _tmp_settings(keys)
+	settings["box"] = rect.x
+	label.set_meta(UiText.META, settings)
+	UiText.render(label)
+	Graphic.update(label, {"color": keys["m_fontColor"] if keys.get("m_fontColor") is Color else Color.WHITE, "enabled": _to_int(keys.get("m_Enabled", 1)) != 0})
 	# readable from the object's -z side like every Unity text; x is mirrored in the Godot scene
 	label.transform = Transform3D(Basis.from_euler(Vector3(0.0, PI, 0.0)), Vector3(-(x - pivot.x) * rect.x, (y - pivot.y) * rect.y, 0.0))
 	state.add_child(label, node, obj)
 	stats["text_3d"] = int(stats.get("text_3d", 0)) + 1
-
-
-static func _strip_tags(s: String) -> String:
-	var re := RegEx.new()
-	re.compile("<[^>]*>")
-	return re.sub(s, "", true)
 
 
 func handle_scripted_object(_obj: RefCounted):
@@ -191,6 +186,38 @@ func setup_post_scene(pkgasset: RefCounted, _root_objects: Array, _root_skelleys
 		cfg[e["cfg_key"]] = n.get_path_to(control_of(target) if control_of(target) != null else target)
 		n.set_meta(e["meta_key"], cfg)
 	_pending = remaining
+	_finish_widgets(scene_contents)
+
+
+## Every object of the scene exists and the references between them are node paths: what one
+## object does to another (a Selectable to its target graphic, a Slider to its fill and handle,
+## an input field to its text objects) is applied, so the saved scene shows Unity's resting state.
+func _finish_widgets(n: Node) -> void:
+	if n is Control:
+		if n.has_meta(selectable_script.META):
+			selectable_script.refresh_static(n)
+		if n is LineEdit and n.has_meta(&"unidot_input"):
+			_finish_input(n)
+	for c in n.get_children():
+		_finish_widgets(c)
+
+
+## Unity draws an input field with two child objects, the text and the placeholder; a LineEdit
+## draws both itself, with their fonts and colours.
+func _finish_input(field: LineEdit) -> void:
+	var cfg: Dictionary = field.get_meta(&"unidot_input")
+	var shown: Node = field.get_node_or_null(cfg["text"]) if cfg.get("text") is NodePath else null
+	var hint: Node = field.get_node_or_null(cfg["placeholder"]) if cfg.get("placeholder") is NodePath else null
+	if shown is RichTextLabel and shown != field:
+		field.add_theme_color_override("font_color", Graphic.color(shown))
+		field.add_theme_font_override("font", shown.get_theme_font("normal_font"))
+		field.alignment = shown.horizontal_alignment
+		Graphic.update(shown, {"hidden": true})
+	if hint is RichTextLabel and hint != field:
+		var hs: Dictionary = UiText.settings(hint)
+		field.placeholder_text = UiText.plain(str(hs["text"]), bool(hs["rich"]), int(hs["style"]), bool(hs["tmp"]))
+		field.add_theme_color_override("font_placeholder_color", Graphic.color(hint))
+		Graphic.update(hint, {"hidden": true})
 
 
 ## The Control of a UI GameObject node: the node itself, or a canvas's root control.
@@ -389,9 +416,8 @@ func _new_control(primary: String, keys: Dictionary) -> Control:
 			node = OptionButton.new()
 		"ScrollRect":
 			node = ScrollContainer.new()
-		"Text":
-			node = Label.new()
-		"TextMeshProUGUI":
+		"Text", "TextMeshProUGUI":
+			# a RichTextLabel for uGUI's Text too: rich text, and lines that do not fit are not drawn
 			node = RichTextLabel.new()
 			node.bbcode_enabled = true
 			node.scroll_active = false
@@ -479,14 +505,19 @@ func _build_screen_canvas(holder: Node3D, root: Control, v: Dictionary, canvas_k
 
 
 ## The helper child that runs Unity's auto layout for `ctl` (runtime/layout_group.gd).
-## A child, not a script on the Control: that slot is left to the scene's own scripts.
 func _ensure_layout_helper(ctl: Control, state: RefCounted) -> void:
-	if ctl.get_node_or_null("UnidotLayout") != null:
+	_ensure_helper(ctl, state, "UnidotLayout", layout_group_script)
+
+
+## Runtime behaviour of a UI object lives in helper children, not in a script on the Control:
+## that slot is left to the scene's own scripts.
+func _ensure_helper(ctl: Control, state: RefCounted, helper_name: String, script: Script) -> void:
+	if ctl.get_node_or_null(helper_name) != null:
 		return
 	var helper := Node.new()
-	helper.name = "UnidotLayout"
+	helper.name = helper_name
 	helper.set_meta(RT.META_HELPER, true)
-	helper.set_script(layout_group_script)
+	helper.set_script(script)
 	ctl.add_child(helper)
 	helper.owner = state.owner if state.owner != null else ctl
 
@@ -547,9 +578,10 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 	state.add_fileID(ctl, obj)
 	var keys: Dictionary = obj.keys
 	match kind:
-		"Image":
-			var tex: Texture2D = _sprite_texture(obj.get_ref(keys, "m_Sprite"), obj)
-			var col: Color = keys.get("m_Color", Color.WHITE) if keys.get("m_Color") is Color else Color.WHITE
+		"Image", "RawImage":
+			var tex: Texture2D = _sprite_texture(obj.get_ref(keys, "m_Sprite" if kind == "Image" else "m_Texture"), obj)
+			# colour, CanvasRenderer colour and enabled are applied by runtime/ui_graphic.gd
+			var graphic: Dictionary = {"color": keys["m_Color"] if keys.get("m_Color") is Color else Color.WHITE, "enabled": _to_int(keys.get("m_Enabled", 1)) != 0}
 			if ctl is TextureRect:
 				# Unity draws an Image without a sprite as a solid rectangle in its colour, and the
 				# built-in UI sprites (UISprite, Background, Knob ...) are not part of any package:
@@ -557,37 +589,25 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 				ctl.texture = tex if tex != null else _white_texture()
 				if tex == null:
 					ctl.set_meta("unidot_no_sprite", true)
-				ctl.self_modulate = col
-				if ctl.has_meta("unidot_mask_hidden"):
-					ctl.self_modulate.a = 0.0  # a Mask that does not show its graphic (any order)
-				if _to_int(keys.get("m_PreserveAspect", 0)) != 0:
+				if kind == "Image" and _to_int(keys.get("m_PreserveAspect", 0)) != 0:
 					ctl.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			else:
-				_apply_background(ctl, tex, col, keys)
-		"RawImage":
-			var tex2: Texture2D = _sprite_texture(obj.get_ref(keys, "m_Texture"), obj)
-			var col2: Color = keys.get("m_Color", Color.WHITE) if keys.get("m_Color") is Color else Color.WHITE
-			if ctl is TextureRect:
-				ctl.texture = tex2 if tex2 != null else _white_texture()
-				if tex2 == null:
-					ctl.set_meta("unidot_no_sprite", true)
-				ctl.self_modulate = col2
-				if ctl.has_meta("unidot_mask_hidden"):
-					ctl.self_modulate.a = 0.0
-			else:
-				_apply_background(ctl, tex2, col2, keys)
+			elif tex != null:
+				graphic["texture"] = tex   # the background of a widget
+			Graphic.update(ctl, graphic)
 		"Text":
-			_configure_text(ctl, keys, obj)
+			_configure_text(ctl, keys, obj, state)
 		"TextMeshProUGUI":
-			_configure_tmp(ctl, keys, obj)
+			_configure_tmp(ctl, keys, obj, state)
 		"Button":
 			if ctl is BaseButton:
 				ctl.disabled = _to_int(keys.get("m_Interactable", 1)) == 0
+			_selectable(ctl, keys, obj, state)
 			_events(keys.get("m_OnClick"), ctl, "pressed", 0, state, obj)
 		"Toggle":
 			if ctl is BaseButton:
 				ctl.button_pressed = _to_int(keys.get("m_IsOn", 0)) != 0
 				ctl.disabled = _to_int(keys.get("m_Interactable", 1)) == 0
+			_selectable(ctl, keys, obj, state, {"graphic": "graphic"})
 			_events(keys.get("onValueChanged"), ctl, "toggled", 1, state, obj)
 		"Scrollbar":
 			if ctl is Range:
@@ -598,6 +618,7 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 				ctl.page = 0.0
 				ctl.value = _to_float(keys.get("m_Value", 0.0))
 				ctl.set_meta("unidot_scrollbar", {"direction": _to_int(keys.get("m_Direction", 0)), "size": _to_float(keys.get("m_Size", 1.0))})
+			_selectable(ctl, keys, obj, state)
 			_events(keys.get("m_OnValueChanged"), ctl, "value_changed", 1, state, obj)
 		"Slider":
 			if ctl is Range:
@@ -606,6 +627,8 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 				ctl.rounded = _to_int(keys.get("m_WholeNumbers", 0)) != 0
 				ctl.step = 1.0 if ctl.rounded else 0.0
 				ctl.value = _to_float(keys.get("m_Value", 0.0))
+				ctl.editable = _to_int(keys.get("m_Interactable", 1)) != 0
+			_selectable(ctl, keys, obj, state, {"m_FillRect": "fill", "m_HandleRect": "handle"})
 			_events(keys.get("m_OnValueChanged"), ctl, "value_changed", 1, state, obj)
 		"InputField", "TMP_InputField":
 			if ctl is LineEdit:
@@ -613,6 +636,16 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 				ctl.max_length = _to_int(keys.get("m_CharacterLimit", 0))
 				ctl.editable = _to_int(keys.get("m_Interactable", 1)) != 0
 				ctl.add_theme_font_size_override("font_size", _input_font_size(ctl, keys, obj))
+				UiText.set_fonts(ctl)
+				# the Unity objects that draw the text and the placeholder (built later)
+				ctl.set_meta(&"unidot_input", {})
+				for pair in [["m_TextComponent", "text"], ["m_Placeholder", "placeholder"]]:
+					var tp: NodePath = _ref_path(keys.get(pair[0]), obj, ctl, "unidot_input", pair[1])
+					if tp != NodePath():
+						var ic: Dictionary = ctl.get_meta(&"unidot_input")
+						ic[pair[1]] = tp
+						ctl.set_meta(&"unidot_input", ic)
+			_selectable(ctl, keys, obj, state)
 			_events(keys.get("m_OnEndEdit"), ctl, "text_submitted", 1, state, obj)
 			_events(keys.get("m_OnValueChanged"), ctl, "text_changed", 1, state, obj)
 			_events(keys.get("m_OnSubmit"), ctl, "text_submitted", 1, state, obj)
@@ -631,6 +664,7 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 					if cap != NodePath():
 						ctl.set_meta("unidot_dropdown", {"caption": cap})
 				ctl.set_script(dropdown_script)
+			_selectable(ctl, keys, obj, state)
 			_events(keys.get("m_OnValueChanged"), ctl, "item_selected", 1, state, obj)
 		"ScrollRect":
 			if ctl is ScrollContainer:
@@ -653,10 +687,9 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 				_events(keys.get("m_OnValueChanged"), ctl, "scrolled", 1, state, obj)
 		"Mask", "RectMask2D":
 			ctl.clip_contents = true
-			if kind == "Mask" and _to_int(keys.get("m_ShowMaskGraphic", 1)) == 0 and ctl is TextureRect:
+			if kind == "Mask" and _to_int(keys.get("m_ShowMaskGraphic", 1)) == 0 and _to_int(keys.get("m_Enabled", 1)) != 0:
 				# the Image of the same object may be configured before or after this component
-				ctl.set_meta("unidot_mask_hidden", true)
-				ctl.self_modulate.a = 0.0
+				Graphic.update(ctl, {"hidden": true})
 		"HorizontalLayoutGroup", "VerticalLayoutGroup", "GridLayoutGroup":
 			# Unity's auto layout runs at run time (runtime/layout_group.gd on a helper child)
 			var pd = keys.get("m_Padding", {})
@@ -748,24 +781,6 @@ func _input_font_size(ctl: Control, keys: Dictionary, obj: RefCounted) -> int:
 	return maxi(int(size), 1)
 
 
-func _apply_background(ctl: Control, tex: Texture2D, col: Color, keys: Dictionary) -> void:
-	var sb: StyleBox
-	if tex != null:
-		var sbt := StyleBoxTexture.new()
-		sbt.texture = tex
-		sbt.modulate_color = col
-		sb = sbt
-	else:
-		var sbf := StyleBoxFlat.new()
-		sbf.bg_color = col
-		sb = sbf
-	for st in ["normal", "hover", "pressed", "disabled", "focus", "panel"]:
-		if ctl.has_theme_stylebox(st):
-			ctl.add_theme_stylebox_override(st, sb)
-	if ctl is BaseButton:
-		ctl.flat = false
-
-
 func _sprite_texture(ref: Array, obj: RefCounted) -> Texture2D:
 	if ref.size() < 4 or ref[1] == 0:
 		return null
@@ -783,82 +798,167 @@ func _sprite_texture(ref: Array, obj: RefCounted) -> Texture2D:
 	return null
 
 
-func _configure_text(ctl: Control, keys: Dictionary, obj: RefCounted) -> void:
-	var text: String = str(keys.get("m_Text", "")) if keys.get("m_Text") != null else ""
-	var fd = keys.get("m_FontData", {})
-	var size: int = 14
-	var align: int = 0
-	if fd is Dictionary:
-		size = _to_int(fd.get("m_FontSize", 14))
-		align = _to_int(fd.get("m_Alignment", 0))
-	var col: Color = keys.get("m_Color", Color.WHITE) if keys.get("m_Color") is Color else Color.WHITE
-	if ctl is Label:
-		ctl.text = text
-		ctl.add_theme_font_size_override("font_size", maxi(size, 1))
-		ctl.add_theme_color_override("font_color", col)
-		ctl.horizontal_alignment = [HORIZONTAL_ALIGNMENT_LEFT, HORIZONTAL_ALIGNMENT_CENTER, HORIZONTAL_ALIGNMENT_RIGHT][align % 3]
-		ctl.vertical_alignment = [VERTICAL_ALIGNMENT_TOP, VERTICAL_ALIGNMENT_CENTER, VERTICAL_ALIGNMENT_BOTTOM][mini(int(align / 3), 2)]
-		ctl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		ctl.clip_text = true
-		if fd is Dictionary:
-			var fref: Array = obj.get_ref(fd, "m_Font")
-			if fref[1] != 0 and obj.meta.lookup_meta(fref) != null:
-				var font = obj.meta.get_godot_resource(fref, true)
-				if font is Font:
-					ctl.add_theme_font_override("font", font)
-	elif ctl is Button:
-		ctl.text = text
+## What a Selectable (Button, Toggle, Slider, InputField, Dropdown, Scrollbar) does to other
+## objects: the colour tint of its target graphic, and the objects named by `refs`
+## (Unity field → entry of the `unidot_selectable` metadata). runtime/selectable.gd applies it.
+func _selectable(ctl: Control, keys: Dictionary, obj: RefCounted, state: RefCounted, refs: Dictionary = {}) -> void:
+	var cfg: Dictionary = {"transition": _to_int(keys.get("m_Transition", 1))}
+	var block = keys.get("m_Colors")
+	if block is Dictionary:
+		var colors: Dictionary = {}
+		for pair in [["m_NormalColor", "normalColor"], ["m_HighlightedColor", "highlightedColor"], ["m_PressedColor", "pressedColor"], ["m_SelectedColor", "selectedColor"], ["m_DisabledColor", "disabledColor"]]:
+			if block.get(pair[0]) is Color:
+				colors[pair[1]] = block[pair[0]]
+		if not colors.has("selectedColor") and colors.has("highlightedColor"):
+			colors["selectedColor"] = colors["highlightedColor"]   # files older than Unity 2019.1
+		colors["colorMultiplier"] = _to_float(block.get("m_ColorMultiplier", 1.0))
+		colors["fadeDuration"] = _to_float(block.get("m_FadeDuration", 0.1))
+		cfg["colors"] = colors
+	if keys.has("m_Direction"):
+		cfg["direction"] = _to_int(keys["m_Direction"])
+	if keys.has("m_FillRect"):
+		# a fill that is an Image of type Filled is not resized
+		var fill_ref = keys["m_FillRect"]
+		var fill_obj = obj.meta.lookup(fill_ref) if typeof(fill_ref) == TYPE_ARRAY and fill_ref.size() >= 2 and fill_ref[1] != 0 else null
+		if fill_obj != null and fill_obj.gameObject != null:
+			for component_ref in fill_obj.gameObject.components:
+				var component = obj.meta.lookup(component_ref.values()[0])
+				if component != null and component.type == "MonoBehaviour" and component.keys.has("m_FillMethod") and _to_int(component.keys.get("m_Type", 0)) == 3:
+					cfg["fill_image"] = true
+	ctl.set_meta(selectable_script.META, cfg)
+	var fields: Dictionary = {"m_TargetGraphic": "target"}
+	fields.merge(refs, true)
+	var drives: bool = false
+	for field in fields:
+		var ref = keys.get(field)
+		if typeof(ref) != TYPE_ARRAY or ref.size() < 2 or ref[1] == 0:
+			continue
+		if field == "m_TargetGraphic" and cfg["transition"] != 1:
+			continue
+		drives = true
+		var np: NodePath = _ref_path(ref, obj, ctl, String(selectable_script.META), fields[field])
+		if np != NodePath():
+			cfg = ctl.get_meta(selectable_script.META)
+			cfg[fields[field]] = np
+			ctl.set_meta(selectable_script.META, cfg)
+	if drives:
+		_ensure_helper(ctl, state, selectable_script.HELPER, selectable_script)
 
 
-func _configure_tmp(ctl: Control, keys: Dictionary, _obj: RefCounted) -> void:
-	var text: String = str(keys.get("m_text", "")) if keys.get("m_text") != null else ""
-	var size: float = _to_float(keys.get("m_fontSize", 14.0))
-	var col: Color = keys.get("m_fontColor", Color.WHITE) if keys.get("m_fontColor") is Color else Color.WHITE
-	var align: int = _to_int(keys.get("m_HorizontalAlignment", 1))
-	var valign: int = _to_int(keys.get("m_VerticalAlignment", 256))
+var _families: Dictionary = {}   # font → [regular, bold, italic, bold italic]
+
+## Bold and italic of a font that comes as one file: synthesized.
+func _font_family(font: Font) -> Array:
+	if font == null:
+		return UiText.FONTS
+	if not _families.has(font):
+		var bold := FontVariation.new()
+		bold.base_font = font
+		bold.variation_embolden = 0.8
+		var italic := FontVariation.new()
+		italic.base_font = font
+		italic.variation_transform = Transform2D(Vector2(1.0, 0.2), Vector2(0.0, 1.0), Vector2.ZERO)
+		var both := FontVariation.new()
+		both.base_font = font
+		both.variation_embolden = 0.8
+		both.variation_transform = italic.variation_transform
+		_families[font] = [font, bold, italic, both]
+	return _families[font]
+
+
+## A text component on its Control: the settings go to the `unidot_text` metadata and
+## runtime/ui_text.gd renders them (as it does when a script changes the text later).
+func _text_control(ctl: Control, settings: Dictionary, color: Color, enabled: bool, h: int, v: int, fonts: Array, state: RefCounted) -> void:
 	if ctl is RichTextLabel:
-		ctl.bbcode_enabled = true
-		ctl.text = _tmp_to_bbcode(text)
-		ctl.add_theme_font_size_override("normal_font_size", maxi(int(size), 1))
-		ctl.add_theme_font_size_override("bold_font_size", maxi(int(size), 1))
-		ctl.add_theme_color_override("default_color", col)
-		ctl.scroll_active = false
-		var h: int = HORIZONTAL_ALIGNMENT_LEFT
-		match align:
-			2:
-				h = HORIZONTAL_ALIGNMENT_CENTER
-			4:
-				h = HORIZONTAL_ALIGNMENT_RIGHT
-			8:
-				h = HORIZONTAL_ALIGNMENT_FILL
 		ctl.horizontal_alignment = h
-		match valign:
-			512:
-				ctl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-			1024:
-				ctl.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
-			_:
-				ctl.vertical_alignment = VERTICAL_ALIGNMENT_TOP
-		ctl.set_meta("unidot_tmp", true)
-	elif ctl is Label:
-		ctl.text = text
+		ctl.vertical_alignment = v
+		UiText.set_fonts(ctl, fonts)
+		ctl.set_meta(UiText.META, settings)
+		UiText.render(ctl)
+		Graphic.update(ctl, {"color": color, "enabled": enabled})
+		if bool(settings.get("auto", false)):
+			_ensure_helper(ctl, state, UiText.HELPER, text_fit_script)
 	elif ctl is Button:
-		ctl.text = text
+		# a text on the object of a button itself
+		ctl.text = UiText.plain(str(settings["text"]), bool(settings["rich"]), int(settings["style"]), bool(settings["tmp"]))
+		ctl.add_theme_font_override("font", fonts[int(settings["style"]) & 3])
+		ctl.add_theme_font_size_override("font_size", maxi(int(round(float(settings["size"]))), 1))
+		for item in ["font_color", "font_hover_color", "font_pressed_color", "font_focus_color", "font_hover_pressed_color", "font_disabled_color"]:
+			ctl.add_theme_color_override(item, color if enabled else Color(color.r, color.g, color.b, 0.0))
 
 
-## Minimal TextMeshPro rich text → BBCode (colour, bold, italic, size, line breaks).
-static func _tmp_to_bbcode(s: String) -> String:
-	var out: String = s
-	out = out.replace("<b>", "[b]").replace("</b>", "[/b]").replace("<i>", "[i]").replace("</i>", "[/i]")
-	out = out.replace("</color>", "[/color]").replace("</size>", "[/font_size]")
-	var re := RegEx.new()
-	re.compile("<color=(#?[0-9A-Fa-f]{6,8}|[a-zA-Z]+)>")
-	out = re.sub(out, "[color=$1]", true)
-	re.compile("<size=([0-9.]+)>")
-	out = re.sub(out, "[font_size=$1]", true)
-	re.compile("<[^>]*>")
-	out = re.sub(out, "", true)
-	return out
+func _configure_text(ctl: Control, keys: Dictionary, obj: RefCounted, state: RefCounted) -> void:
+	var fd: Dictionary = keys["m_FontData"] if keys.get("m_FontData") is Dictionary else {}
+	var align: int = _to_int(fd.get("m_Alignment", 0))
+	var overflows: bool = _to_int(fd.get("m_HorizontalOverflow", 0)) != 0 or _to_int(fd.get("m_VerticalOverflow", 0)) != 0
+	var settings: Dictionary = {
+		"text": str(keys["m_Text"]) if keys.get("m_Text") != null else "",
+		"tmp": false,
+		"rich": _to_int(fd.get("m_RichText", 1)) != 0,
+		"size": _to_float(fd.get("m_FontSize", 14)),
+		"style": _to_int(fd.get("m_FontStyle", 0)) & 3,
+		"auto": _to_int(fd.get("m_BestFit", 0)) != 0,
+		"min": _to_float(fd.get("m_MinSize", 10)),
+		"max": _to_float(fd.get("m_MaxSize", 40)),
+		"wrap": _to_int(fd.get("m_HorizontalOverflow", 0)) == 0,
+		"overflow": 0 if overflows else 3,
+	}
+	# the built-in font is Arial; a font of the project comes as one file
+	var font: Font = null
+	var fref: Array = obj.get_ref(fd, "m_Font") if fd.has("m_Font") else [null, 0, null, null]
+	if fref[1] != 0 and obj.meta.lookup_meta(fref) != null:
+		font = obj.meta.get_godot_resource(fref, true) as Font
+	var col: Color = keys["m_Color"] if keys.get("m_Color") is Color else Color.WHITE
+	_text_control(ctl, settings, col, _to_int(keys.get("m_Enabled", 1)) != 0,
+		[HORIZONTAL_ALIGNMENT_LEFT, HORIZONTAL_ALIGNMENT_CENTER, HORIZONTAL_ALIGNMENT_RIGHT][align % 3],
+		[VERTICAL_ALIGNMENT_TOP, VERTICAL_ALIGNMENT_CENTER, VERTICAL_ALIGNMENT_BOTTOM][clampi(int(align / 3), 0, 2)],
+		_font_family(font), state)
+
+
+## The `unidot_text` settings of a TextMeshPro component (TextMeshProUGUI and the 3D TextMeshPro).
+func _tmp_settings(keys: Dictionary) -> Dictionary:
+	var wrap: bool = _to_int(keys.get("m_enableWordWrapping", 1)) != 0
+	if keys.has("m_TextWrappingMode"):
+		wrap = _to_int(keys["m_TextWrappingMode"]) in [1, 2]
+	return {
+		"text": str(keys["m_text"]) if keys.get("m_text") != null else "",
+		"tmp": true,
+		"rich": _to_int(keys.get("m_isRichText", 1)) != 0,
+		"size": _to_float(keys.get("m_fontSize", 36.0)),
+		"style": _to_int(keys.get("m_fontStyle", 0)),
+		"auto": _to_int(keys.get("m_enableAutoSizing", 0)) != 0,
+		"min": _to_float(keys.get("m_fontSizeMin", 18.0)),
+		"max": _to_float(keys.get("m_fontSizeMax", 72.0)),
+		"wrap": wrap,
+		"overflow": _to_int(keys.get("m_overflowMode", 0)),
+	}
+
+
+func _configure_tmp(ctl: Control, keys: Dictionary, _obj: RefCounted, state: RefCounted) -> void:
+	# files written before TextMeshPro 2.1 hold both alignments in one value
+	var ha: int = _to_int(keys.get("m_HorizontalAlignment", 1))
+	var va: int = _to_int(keys.get("m_VerticalAlignment", 256))
+	var combined: int = _to_int(keys.get("m_textAlignment", 65535))
+	if combined != 65535:
+		ha = combined & 0xFF
+		va = combined & 0xFF00
+	var h: int = HORIZONTAL_ALIGNMENT_LEFT
+	match ha:
+		2, 32:
+			h = HORIZONTAL_ALIGNMENT_CENTER
+		4:
+			h = HORIZONTAL_ALIGNMENT_RIGHT
+		8, 16:
+			h = HORIZONTAL_ALIGNMENT_FILL
+	var v: int = VERTICAL_ALIGNMENT_TOP
+	match va:
+		512, 2048, 4096, 8192:
+			v = VERTICAL_ALIGNMENT_CENTER
+		1024:
+			v = VERTICAL_ALIGNMENT_BOTTOM
+	var col: Color = keys["m_fontColor"] if keys.get("m_fontColor") is Color else Color.WHITE
+	# TextMeshPro font assets are not converted: its default font's family stands in for all
+	_text_control(ctl, _tmp_settings(keys), col, _to_int(keys.get("m_Enabled", 1)) != 0, h, v, UiText.FONTS, state)
 
 
 func _to_float(v) -> float:

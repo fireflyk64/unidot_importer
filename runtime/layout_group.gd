@@ -26,6 +26,7 @@ extends Node
 ## rect_transform.gd, so `anchoredPosition` read by a script is what Unity would report.
 
 const RT := preload("./rect_transform.gd")
+const UiText := preload("./ui_text.gd")
 const HELPER := "UnidotLayout"
 
 var _host: Control = null
@@ -192,16 +193,8 @@ func _ask(c: Node, axis: int) -> Array:
 ## Preferred size of a graphic (Unity's Image and Text are layout elements): a sprite's size, a
 ## text's size. (-1, -1) for controls that ask for nothing.
 static func _content_size(ctl: Control, axis: int) -> Vector2:
-	if ctl is Label:
-		var font: Font = ctl.get_theme_font("font")
-		var fsize: int = ctl.get_theme_font_size("font_size")
-		if font == null:
-			return Vector2.ZERO
-		if axis == 0:
-			return font.get_multiline_string_size(ctl.text, HORIZONTAL_ALIGNMENT_LEFT, -1, fsize)
-		return font.get_multiline_string_size(ctl.text, HORIZONTAL_ALIGNMENT_LEFT, maxf(ctl.size.x, 1.0), fsize)
-	if ctl is RichTextLabel:
-		return Vector2(ctl.get_content_width(), ctl.get_content_height())
+	if ctl is Label or ctl is RichTextLabel:
+		return Vector2(UiText.preferred_size(ctl, 0) if axis == 0 else 0.0, UiText.preferred_size(ctl, 1) if axis == 1 else 0.0)
 	if ctl is TextureRect:
 		# an Image without a sprite asks for nothing (the importer gives it a small white texture)
 		var tex: Texture2D = ctl.texture

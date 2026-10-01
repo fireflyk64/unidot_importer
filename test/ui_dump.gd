@@ -9,7 +9,9 @@ extends RefCounted
 ## bottom-left, top-left, top-right and bottom-right corners, followed through what is rendered
 ## (control → viewport pixel → the quad or inline view showing that viewport); `model` are the
 ## same corners from rect_transform.gd's world matrix. Screen-space canvases are in window pixels
-## with y up.
+## with y up. `graphic` is the colour the control draws its Unity graphic with, read from what
+## the control draws (texture and modulation, font colour, style box), alpha 0 when it draws
+## nothing; `text` the characters a text control shows and `font_size` their size.
 
 const RT := preload("../runtime/rect_transform.gd")
 
@@ -85,8 +87,15 @@ static func _walk(n: Node, prefix: String, out: Array) -> void:
 		"active": ctl.visible and (not (RT.store(n) is Node3D) or (RT.store(n) as Node3D).visible),
 		"island": RT.holder_of(ctl) != null,
 	}
-	if ctl is Label or ctl is RichTextLabel or ctl is Button or ctl is LineEdit:
-		e["text"] = str(ctl.text).substr(0, 40)
+	if ctl is RichTextLabel:
+		e["text"] = ctl.get_parsed_text()
+		e["font_size"] = ctl.get_theme_font_size("normal_font_size")
+	elif ctl is Label or ctl is Button or ctl is LineEdit:
+		e["text"] = str(ctl.text)
+		e["font_size"] = ctl.get_theme_font_size("font_size")
+	var g = drawn_color(ctl)
+	if g != null:
+		e["graphic"] = [g.r, g.g, g.b, g.a]
 	out.append(e)
 	for c in RT.logical_children(id):
 		_walk(c, path, out)
@@ -95,3 +104,35 @@ static func _walk(n: Node, prefix: String, out: Array) -> void:
 ## Where a point of a control (its own Godot coordinates) is drawn, in Unity world space.
 static func rendered(c: Control, local: Vector2) -> Vector3:
 	return RT.drawn_point(c, local)
+
+
+## The colour a control draws its graphic with, from the properties that decide the drawing;
+## null for a control that draws no graphic of its own (a plain container).
+static func drawn_color(ctl: Control):
+	var c = null
+	if ctl is TextureRect:
+		c = ctl.self_modulate if ctl.texture != null else Color(1, 1, 1, 0)
+	elif ctl is RichTextLabel:
+		c = ctl.get_theme_color("default_color") * ctl.self_modulate
+	elif ctl is Label:
+		c = ctl.get_theme_color("font_color") * ctl.self_modulate
+	else:
+		for st in ["normal", "panel", "scroll"]:
+			if ctl.has_theme_stylebox(st):
+				var box: StyleBox = ctl.get_theme_stylebox(st)
+				if box is StyleBoxFlat:
+					c = box.bg_color * ctl.self_modulate
+				elif box is StyleBoxTexture:
+					c = box.modulate_color * ctl.self_modulate
+				else:
+					c = Color(1, 1, 1, 0)
+				break
+	if c == null:
+		return null
+	# canvas groups (and anything else that fades a subtree)
+	var n: Node = ctl
+	while n is CanvasItem:
+		c = c * (n as CanvasItem).modulate
+		n = n.get_parent()
+	return c
+

@@ -7,6 +7,8 @@
 ## own text and arrow are made invisible and the label follows the selection.
 extends OptionButton
 
+const UiText := preload("./ui_text.gd")
+
 var _caption: Control = null
 
 
@@ -33,5 +35,4 @@ func refresh_caption() -> void:
 	if _caption == null:
 		return
 	var text: String = get_item_text(selected) if selected >= 0 and selected < item_count else ""
-	if _caption is Label or _caption is RichTextLabel:
-		_caption.text = text
+	UiText.set_text(_caption, text)

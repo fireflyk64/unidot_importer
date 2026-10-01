@@ -1,0 +1,6 @@
+[gd_resource type="SystemFont" format=3]
+
+[resource]
+font_names = PackedStringArray("Liberation Sans", "Arimo", "Arial", "Helvetica", "Nimbus Sans", "sans-serif")
+font_weight = 700
+font_italic = false
