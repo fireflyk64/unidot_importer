@@ -25,6 +25,7 @@ const humanoid_transform_util = preload("./humanoid/transform_util.gd")
 const unidot_utils_class = preload("./unidot_utils.gd")
 const shaderlab := preload("./shaderlab.gd")
 const rect_transform := preload("./runtime/rect_transform.gd")
+const rect_anim := preload("./runtime/rect_anim.gd")
 const ui_integration := preload("./ui_integration.gd")
 
 var unidot_utils = unidot_utils_class.new()
@@ -2614,6 +2615,13 @@ class UnidotAnimationClip:
 				Animation.TYPE_VALUE:
 					new_path = resolve_gameobject_component_path(animator, path, classID)
 					if new_path != NodePath():
+						if classID == 224 and rect_anim.curve_property(attr) != "":
+							# an animated RectTransform: the track drives the helper of its Control
+							var rect_node: Node = node_parent.get_node_or_null(new_path) if node_parent != null else null
+							if rect_node != null and rect_transform.is_ui(rect_node):
+								var rect_owner: Node = node_parent.owner if node_parent.owner != null else node_parent
+								rect_anim.ensure(rect_node, rect_owner, rect_anim)
+							new_path = NodePath(str(new_path) + "/" + rect_anim.HELPER)
 						new_path = NodePath(str(new_path) + ":" + str(resolved_subpath))
 					log_debug("Adapt TYPE_VALUE track " + str(path) + " to " + str(new_path))
 					new_resolved_key = "V" + str(new_path)
@@ -2767,6 +2775,11 @@ class UnidotAnimationClip:
 		# humanoid bone idx -> array of Curve object indexed by muscle axis
 		# [ [{attr:RootT.x},{attr:RootT.y},{attr:RootT.z}], [{attr:RootQ.x},y,z,w], [Shoulder In-Out,...] ...]
 
+		# RectTransforms whose anchored position the clip animates
+		var rect_anchored_paths: Dictionary = {}
+		for track in keys["m_FloatCurves"]:
+			if int(track.get("classID", 0)) == 224 and str(track.get("attribute", "")).begins_with("m_AnchoredPosition."):
+				rect_anchored_paths[str(track.get("path", ""))] = true
 		for track in keys["m_FloatCurves"]:
 			var attr: String = track["attribute"]
 			var path: String = track.get("path", "")  # Some omit path if for the current GameObject...?
@@ -2832,13 +2845,23 @@ class UnidotAnimationClip:
 						if target_node == null:
 							var gdscriptweird: Node = null
 							target_node = gdscriptweird
-					# yuk yuk. This needs to be improved but should be a good start for some properties:
-					var adapted_obj: UnidotObject = adapter.instantiate_unidot_object_from_utype(meta, 0, classID)  # no fileID??
-					var converted_property_keys = adapted_obj.convert_properties(target_node, {attr: 0.0}).keys()
-					if converted_property_keys.is_empty():
-						log_warn("Unknown property " + str(attr) + " for " + str(path) + " type " + str(adapted_obj.type), attr, adapted_obj)
-						continue
-					var converted_property: String = converted_property_keys[0]
+					var converted_property: String = ""
+					if classID == 224:
+						# A value of a RectTransform: the track drives a helper below the Control,
+						# whose properties are Unity's (runtime/rect_anim.gd; the helper's name
+						# joins the path when the clip is adapted to its Animator). Unity records
+						# the local position beside the anchored position: x and y say the same.
+						converted_property = rect_anim.curve_property(attr)
+						if attr in ["m_LocalPosition.x", "m_LocalPosition.y"] and rect_anchored_paths.has(path):
+							continue
+					if converted_property.is_empty():
+						# yuk yuk. This needs to be improved but should be a good start for some properties:
+						var adapted_obj: UnidotObject = adapter.instantiate_unidot_object_from_utype(meta, 0, classID)  # no fileID??
+						var converted_property_keys = adapted_obj.convert_properties(target_node, {attr: 0.0}).keys()
+						if converted_property_keys.is_empty():
+							log_warn("Unknown property " + str(attr) + " for " + str(path) + " type " + str(adapted_obj.type), attr, adapted_obj)
+							continue
+						converted_property = converted_property_keys[0]
 					nodepath = NodePath(str(nodepath) + ":" + converted_property)
 				log_debug("Generated TYPE_VALUE node path " + str(nodepath))
 				var valtrack = anim.add_track(Animation.TYPE_VALUE)
