@@ -118,8 +118,10 @@ func _drawn(c: Control, fade: Color) -> Array:
 		if stex == null and c is TextureRect:
 			stex = c.texture
 		var tint: Color = helper.self_modulate * fade
-		if stex == null or tint.a <= 0.004:
+		if tint.a <= 0.004:
 			return [0, Color.WHITE]
+		if stex == null:
+			return [1 if tint.a >= 0.996 else 2, tint]   # a rectangle in the Image's colour
 		return [5, tint, stex, state.get("sprite", {})]
 	if c is TextureRect:
 		if c.texture == null:

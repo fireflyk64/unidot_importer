@@ -9,7 +9,7 @@ extends Control
 ## The parent's `unidot_graphic` metadata holds the sprite (runtime/ui_graphic.gd):
 ##   texture: Texture2D (an AtlasTexture for a sprite of a sheet; a TextureRect's own texture
 ##            otherwise),
-##   sprite: {type: 1 sliced | 2 tiled | 3 filled,
+##   sprite: {type: 0 simple (stretched) | 1 sliced | 2 tiled | 3 filled,
 ##            border: [left, top, right, bottom] in sprite pixels,
 ##            unit: canvas units per sprite pixel (canvas reference pixels per unit / sprite
 ##                  pixels per unit / the Image's multiplier),
@@ -172,7 +172,11 @@ func _draw() -> void:
 	if tex == null and host is TextureRect:
 		tex = host.texture
 	var sprite: Dictionary = state.get("sprite", {})
-	if tex == null or sprite.is_empty():
+	if sprite.is_empty():
+		return
+	if tex == null:
+		# an Image without a sprite is a rectangle in its colour (on a widget that cannot draw it)
+		draw_rect(Rect2(Vector2.ZERO, size), Color.WHITE)
 		return
 	var src: Array = source(tex)
 	var region: Rect2 = src[1]

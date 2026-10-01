@@ -608,8 +608,12 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 					ctl.set_meta("unidot_no_sprite", true)
 				if kind == "Image" and _to_int(keys.get("m_PreserveAspect", 0)) != 0 and drawn.is_empty():
 					ctl.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			elif tex != null:
-				graphic["texture"] = tex   # the background of a widget
+			else:
+				if tex != null:
+					graphic["texture"] = tex   # the background of a widget
+				if drawn.is_empty() and (ctl is Slider):
+					# a widget that has no box of its own for a background: the helper draws it
+					drawn = {"type": 0}
 			if kind == "Image" and tex != null:
 				# canvas units per sprite pixel, and the size the Image asks for in a layout: its
 				# sprite's, or the borders of a sliced or tiled one (Image.preferredWidth)
