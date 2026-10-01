@@ -50,6 +50,7 @@ func _init() -> void:
 	var holders: Array = []
 	_find(scene, holders)
 	var out: String = str(args.get("out", "user://"))
+	DirAccess.make_dir_recursive_absolute(out)
 	var check: bool = str(args.get("check", "0")) == "1"
 	var count: int = 0
 	var points: int = 0

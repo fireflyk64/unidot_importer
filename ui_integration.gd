@@ -142,6 +142,7 @@ func _text_mesh_3d(obj: RefCounted, state: RefCounted, node: Node3D) -> void:
 	var settings: Dictionary = _tmp_settings(keys)
 	settings["box"] = rect.x
 	label.set_meta(UiText.META, settings)
+	UiText.set_fonts(label, _tmp_fonts(keys, obj))
 	UiText.render(label)
 	Graphic.update(label, {"color": keys["m_fontColor"] if keys.get("m_fontColor") is Color else Color.WHITE, "enabled": _to_int(keys.get("m_Enabled", 1)) != 0})
 	# readable from the object's -z side like every Unity text; x is mirrored in the Godot scene
@@ -150,8 +151,49 @@ func _text_mesh_3d(obj: RefCounted, state: RefCounted, node: Node3D) -> void:
 	stats["text_3d"] = int(stats.get("text_3d", 0)) + 1
 
 
-func handle_scripted_object(_obj: RefCounted):
-	return null
+## TextMeshPro's font asset script.
+const TMP_FONT_ASSET := "71c1514a6bd24e1e882cebbe1904ce04"
+## Metadata of the Font a font asset becomes: {family, style, source: bool (the font file is in
+## the project), bold (weight of the bold style), bold_spacing, italic (slant of the italic style)}
+const META_FONT_ASSET := &"unidot_tmp_font"
+
+
+## A TextMeshPro font asset is an atlas of glyphs made from a font file. Godot draws text from
+## the font file itself, so the asset becomes a variation of the font it was made from (the
+## asset's GUID then loads as a Font). Without that file in the project: a system font of the
+## asset's family when there is one, the stand-in family otherwise.
+func handle_scripted_object(obj: RefCounted):
+	var script_ref = obj.keys.get("m_Script")
+	if not (script_ref is Array) or script_ref.size() < 3 or str(script_ref[2]) != TMP_FONT_ASSET:
+		return null
+	var keys: Dictionary = obj.keys
+	var guid: String = str(keys.get("m_SourceFontFileGUID", ""))
+	if guid.length() != 32 and keys.get("m_CreationSettings") is Dictionary:
+		guid = str((keys["m_CreationSettings"] as Dictionary).get("sourceFontFileGUID", ""))
+	var face: Dictionary = keys["m_FaceInfo"] if keys.get("m_FaceInfo") is Dictionary else {}
+	var family: String = str(face.get("m_FamilyName", "")).strip_edges()
+	var source: Font = null
+	if guid.length() == 32:
+		var ref: Array = [null, 12800000, guid, 3]
+		if obj.meta.lookup_meta_by_guid(guid) != null:
+			source = obj.meta.get_godot_resource(ref, true) as Font
+	var font := FontVariation.new()
+	if source != null:
+		font.base_font = source
+	else:
+		var names: PackedStringArray = (UiText.FONTS[0] as SystemFont).font_names.duplicate()
+		if not family.is_empty():
+			names.insert(0, family)
+		var stand_in := SystemFont.new()
+		stand_in.font_names = names
+		font.base_font = stand_in
+	font.set_meta(META_FONT_ASSET, {
+		"family": family, "style": str(face.get("m_StyleName", "")), "source": source != null,
+		"bold": _to_float(keys.get("boldStyle", 0.75)), "bold_spacing": _to_float(keys.get("boldSpacing", 7.0)),
+		"italic": _to_float(keys.get("italicStyle", 35.0)),
+	})
+	stats["font_assets"] = int(stats.get("font_assets", 0)) + 1
+	return font
 
 
 func post_process_avatar(_obj: RefCounted, _state: RefCounted, _node: Node, _avatar_meta: RefCounted):
@@ -1032,23 +1074,42 @@ func _selectable(ctl: Control, keys: Dictionary, obj: RefCounted, state: RefCoun
 
 var _families: Dictionary = {}   # font → [regular, bold, italic, bold italic]
 
-## Bold and italic of a font that comes as one file: synthesized.
+## Bold and italic of a font that comes as one file: synthesized. A TextMeshPro font asset says
+## how (TextMeshPro makes both from the regular glyphs as well: `italicStyle` is the slant in
+## hundredths, 35 by default).
 func _font_family(font: Font) -> Array:
 	if font == null:
 		return UiText.FONTS
 	if not _families.has(font):
+		var slant: float = 0.2
+		if font.has_meta(META_FONT_ASSET):
+			var info: Dictionary = font.get_meta(META_FONT_ASSET)
+			if not bool(info.get("source", false)) and str(info.get("family", "")).is_empty():
+				return UiText.FONTS
+			slant = clampf(float(info.get("italic", 35.0)) * 0.01, 0.0, 1.0)
 		var bold := FontVariation.new()
 		bold.base_font = font
 		bold.variation_embolden = 0.8
 		var italic := FontVariation.new()
 		italic.base_font = font
-		italic.variation_transform = Transform2D(Vector2(1.0, 0.2), Vector2(0.0, 1.0), Vector2.ZERO)
+		italic.variation_transform = Transform2D(Vector2(1.0, slant), Vector2(0.0, 1.0), Vector2.ZERO)
 		var both := FontVariation.new()
 		both.base_font = font
 		both.variation_embolden = 0.8
 		both.variation_transform = italic.variation_transform
 		_families[font] = [font, bold, italic, both]
 	return _families[font]
+
+
+## The fonts of a TextMeshPro component: its font asset (see handle_scripted_object), or the
+## stand-in family when the asset is not in the project (TextMeshPro's own LiberationSans SDF).
+func _tmp_fonts(keys: Dictionary, obj: RefCounted) -> Array:
+	if obj == null or not keys.has("m_fontAsset"):
+		return UiText.FONTS
+	var ref: Array = obj.get_ref(keys, "m_fontAsset")
+	if ref.size() < 3 or ref[1] == 0 or typeof(ref[2]) != TYPE_STRING or obj.meta.lookup_meta_by_guid(ref[2]) == null:
+		return UiText.FONTS
+	return _font_family(obj.meta.get_godot_resource(ref, true) as Font)
 
 
 ## A text component on its Control: the settings go to the `unidot_text` metadata and
@@ -1119,7 +1180,7 @@ func _tmp_settings(keys: Dictionary) -> Dictionary:
 	}
 
 
-func _configure_tmp(ctl: Control, keys: Dictionary, _obj: RefCounted, state: RefCounted) -> void:
+func _configure_tmp(ctl: Control, keys: Dictionary, obj: RefCounted, state: RefCounted) -> void:
 	# files written before TextMeshPro 2.1 hold both alignments in one value
 	var ha: int = _to_int(keys.get("m_HorizontalAlignment", 1))
 	var va: int = _to_int(keys.get("m_VerticalAlignment", 256))
@@ -1130,8 +1191,7 @@ func _configure_tmp(ctl: Control, keys: Dictionary, _obj: RefCounted, state: Ref
 	var h: int = _tmp_halign(ha)
 	var v: int = _tmp_valign(va)
 	var col: Color = keys["m_fontColor"] if keys.get("m_fontColor") is Color else Color.WHITE
-	# TextMeshPro font assets are not converted: its default font's family stands in for all
-	_text_control(ctl, _tmp_settings(keys), col, _to_int(keys.get("m_Enabled", 1)) != 0, h, v, UiText.FONTS, state)
+	_text_control(ctl, _tmp_settings(keys), col, _to_int(keys.get("m_Enabled", 1)) != 0, h, v, _tmp_fonts(keys, obj), state)
 
 
 # ---------------------------------------------------------------------------------------------

@@ -90,6 +90,7 @@ static func _walk(n: Node, prefix: String, out: Array) -> void:
 	if ctl is RichTextLabel:
 		e["text"] = ctl.get_parsed_text()
 		e["font_size"] = ctl.get_theme_font_size("normal_font_size")
+		e["font"] = font_family(ctl.get_theme_font("normal_font"))
 	elif ctl is Label or ctl is Button or ctl is LineEdit:
 		e["text"] = str(ctl.text)
 		e["font_size"] = ctl.get_theme_font_size("font_size")
@@ -104,6 +105,15 @@ static func _walk(n: Node, prefix: String, out: Array) -> void:
 ## Where a point of a control (its own Godot coordinates) is drawn, in Unity world space.
 static func rendered(c: Control, local: Vector2) -> Vector3:
 	return RT.drawn_point(c, local)
+
+
+## The family of the font file a text is drawn with (through font variations).
+static func font_family(font: Font) -> String:
+	var depth: int = 0
+	while font is FontVariation and depth < 8:
+		font = (font as FontVariation).base_font
+		depth += 1
+	return font.get_font_name() if font != null else ""
 
 
 ## The colour a control draws its graphic with, from the properties that decide the drawing;
