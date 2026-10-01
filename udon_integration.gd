@@ -1239,6 +1239,9 @@ func _resolve_pending_event(e: Dictionary, meta: Resource, _state: RefCounted, s
 	var callable: Callable
 	if e["method"] == "SendCustomEvent" and e["event"] != "":
 		callable = Callable(target, "SendCustomEvent").bind(e["event"])
+	elif e["method"] == "Interact":
+		# UdonBehaviour.Interact: what using the object does
+		callable = Callable(target, "Interact")
 	elif e["method"] == "SetActive" or e["method"] == "set_enabled":
 		var on: bool = _to_int(e["args"].get("m_BoolArgument", 0)) != 0 if e["args"] is Dictionary else true
 		callable = Callable(target, "set_visible").bind(on)
