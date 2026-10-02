@@ -705,6 +705,39 @@ func _sibling_order(host: Control) -> void:
 	parent.free()
 
 
+## An Image on a rect of negative size: the helper is as large as the rect should be and
+## draws mirrored about the Control's origin.
+func _mirrored_image() -> void:
+	var box := Control.new()
+	box.size = Vector2(100, 60)
+	root.add_child(box)
+	var image := TextureRect.new()
+	box.add_child(image)
+	RT.set_values(image, {"anchor_min": Vector2(0, 0), "anchor_max": Vector2(1, 1), "anchored_position": Vector2.ZERO, "size_delta": Vector2(-130, -20), "pivot": Vector2(0.5, 0.5)})
+	near(RT.rect_size(image), Vector2(-30, 40), "a rect stretched with insets larger than its parent: 30 wide the other way")
+	near(image.size, Vector2(0, 40), "... the Control has no width")
+	near(Sprite.mirror_of(image), Vector2(-1, 1), "... mirrored on x")
+	image.set_meta(Sprite.META_GRAPHIC, {})
+	var helper := Control.new()
+	helper.name = Sprite.HELPER
+	helper.set_script(Sprite)
+	image.add_child(helper)
+	near(helper.size, Vector2(30, 40), "the helper is as large as the rect should be")
+	near(helper.position, Vector2.ZERO, "... at the Control's origin (it draws mirrored about it)")
+	ok(helper.draws(), "... and draws a simple sprite too")
+	# the picture lies where Unity has the rect: from the Control's origin 30 to the left
+	near(image.position.x, 65.0, "the Control's origin is the rect's left edge value: 65 into the box")
+	RT.set_values(image, {"size_delta": Vector2(-20, -90)})
+	near(helper.size, Vector2(80, 30), "the rect changes: the helper follows (80 x -30)")
+	near(Sprite.mirror_of(image), Vector2(1, -1), "... mirrored on y now")
+	RT.set_values(image, {"size_delta": Vector2(-20, -20)})
+	near(helper.size, Vector2(80, 40), "a rect of positive size again: the helper covers the Control")
+	near(Sprite.mirror_of(image), Vector2.ONE, "... not mirrored")
+	ok(not helper.draws(), "... and a simple sprite is the Control's own again")
+	root.remove_child(box)
+	box.free()
+
+
 ## TextMeshPro's margins (the text is laid out in the rect without them) and the line spacing
 ## of both kinds of text.
 func _text_margins(host: Control) -> void:
@@ -1419,6 +1452,11 @@ func _sprites() -> void:
 	near(Sprite.slice_texel(Vector2(58, 8), Vector2(200, 100), s64, b16, 1.0), Vector2(24, 8), "the top edge is stretched along x only: 42 of 168 units in is 8 of 32 pixels")
 	near(Sprite.slice_texel(Vector2(5, 40), Vector2(20, 80), s64, b16, 1.0), Vector2(8, 32), "shrunk borders: 5 of 10 units is 8 of 16 pixels")
 	near(Sprite.slice_texel(Vector2(4, 4), Vector2(160, 60), s64, b16, 0.5), Vector2(8, 8), "multiplier 2: 4 units in is 8 pixels in")
+	# a rect of negative size (its amount is given): the borders fill that axis between them
+	near(Sprite.slice_scale(Vector2(70, 100), b16, 1.0, Vector2(-1, 1)), Vector2(70.0 / 32.0, 1), "a negative width of 70: the two borders of 16 are 35 each")
+	near(Sprite.slice_texel(Vector2(34, 50), Vector2(70, 100), s64, b16, 1.0, Vector2(-1, 1)).x, 34.0 * 32.0 / 70.0, "... and the left border reaches the middle")
+	near(Sprite.slice_texel(Vector2(36, 50), Vector2(70, 100), s64, b16, 1.0, Vector2(-1, 1)).x, 64.0 - 34.0 * 32.0 / 70.0, "... where the right one begins: no centre")
+	_mirrored_image()
 	var r: Array = Sprite.fill_rects(Vector2(128, 32), Vector2(64, 16), 0, 0, 0.25)
 	near(r[0], Rect2(0, 0, 32, 32), "horizontal fill from the left, a quarter: the left quarter of the rect")
 	near(r[1], Rect2(0, 0, 16, 16), "... shows the left quarter of the sprite")

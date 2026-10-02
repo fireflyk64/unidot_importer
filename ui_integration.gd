@@ -331,8 +331,22 @@ func setup_post_children(_game_object: RefCounted, state: RefCounted, node: Node
 	# the canvas's controls exist now: size its viewport and plane to what it draws
 	if node != null and RT.is_island(node):
 		RT.fit_island(node)
+	if node != null and RT.is_canvas(node):
+		_mirror_helpers(node, state.owner if state.owner != null else node)
 	if node is Control:
 		_frame_components(node, state)
+
+
+## An Image whose rect has a negative size is drawn mirrored by the sprite helper
+## (runtime/ui_sprite.gd): the ones below `n` that are such when the canvas is complete.
+func _mirror_helpers(n: Node, owner: Node) -> void:
+	for c in n.get_children():
+		if c is TextureRect and not c.has_meta(RT.META_HELPER) and Graphic.has_graphic(c) and c.get_node_or_null(sprite_script.HELPER) == null:
+			var size: Vector2 = RT.rect_size(c)
+			if size.x < 0.0 or size.y < 0.0:
+				_add_sprite_helper(c, owner)
+				Graphic.apply(c)
+		_mirror_helpers(c, owner)
 
 
 ## Components of a UI object that live in space (a sound, a collider, a mesh: Node3Ds the

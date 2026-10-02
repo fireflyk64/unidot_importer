@@ -20,7 +20,14 @@ extends Control
 ## their size, `unit` per sprite pixel, and shrink together on an axis where the rect is
 ## smaller than both of them. The colour comes from the parent's graphic state as this
 ## node's self-modulate.
+##
+## A rect of negative size (stretched with insets larger than its parent): Unity builds the
+## Image's quad from the rect's origin by its size all the same, so the picture lies on the
+## other side of the origin, mirrored on that axis. The Control has no size there (see
+## rect_transform.gd): this helper is as large as the rect should be and draws mirrored about
+## the Control's origin, a simple sprite too.
 
+const RT := preload("./rect_transform.gd")
 const HELPER := "UnidotSprite"
 const META_GRAPHIC := &"unidot_graphic"
 
@@ -30,18 +37,21 @@ const FILLED := 3
 
 
 ## Canvas units per sprite pixel of the borders on each axis (Image.GetAdjustedBorders).
-static func slice_scale(size: Vector2, border: Array, unit: float) -> Vector2:
+## `mirror`: -1 on an axis where the rect's size is negative (`size` is its amount): Unity
+## scales the borders by rect size / borders there as well, which is negative, so the two
+## borders fill the rect between them and nothing is left for the centre.
+static func slice_scale(size: Vector2, border: Array, unit: float, mirror: Vector2 = Vector2.ONE) -> Vector2:
 	var out := Vector2(unit, unit)
 	for axis in range(2):
 		var combined: float = (float(border[axis]) + float(border[axis + 2])) * unit
-		if combined > 0.0 and size[axis] < combined:
+		if combined > 0.0 and (size[axis] < combined or mirror[axis] < 0.0):
 			out[axis] = unit * size[axis] / combined
 	return out
 
 
 ## The sprite pixel that a sliced image shows at `p` (rect coordinates, origin top-left).
-static func slice_texel(p: Vector2, size: Vector2, sprite_size: Vector2, border: Array, unit: float) -> Vector2:
-	var sc: Vector2 = slice_scale(size, border, unit)
+static func slice_texel(p: Vector2, size: Vector2, sprite_size: Vector2, border: Array, unit: float, mirror: Vector2 = Vector2.ONE) -> Vector2:
+	var sc: Vector2 = slice_scale(size, border, unit, mirror)
 	var out := Vector2.ZERO
 	for axis in range(2):
 		var lead: float = float(border[axis])
@@ -317,6 +327,38 @@ static func radial_covers(p: Vector2, method: int, origin: int, amount: float, c
 
 func _ready() -> void:
 	resized.connect(queue_redraw)
+	var host: Control = get_parent() as Control
+	if host != null:
+		# (the rect of the Image changes: a negative size is no size of the Control)
+		if not host.resized.is_connected(fit):
+			host.resized.connect(fit)
+		fit()
+
+
+## -1 on the axes where the Image's rect has a negative size, 1 on the others.
+static func mirror_of(host: Control) -> Vector2:
+	var unity: Vector2 = RT.rect_size(host)
+	return Vector2(-1.0 if unity.x < 0.0 else 1.0, -1.0 if unity.y < 0.0 else 1.0)
+
+
+## The helper covers the Image's rect: the Control's, or the size the rect should have when
+## that is negative (drawn mirrored about the Control's origin then).
+func fit() -> void:
+	var host: Control = get_parent() as Control
+	if host == null:
+		return
+	var unity: Vector2 = RT.rect_size(host)
+	if unity.x < 0.0 or unity.y < 0.0:
+		set_anchors_preset(Control.PRESET_TOP_LEFT)
+		position = Vector2.ZERO
+		size = unity.abs()
+	elif anchor_right != 1.0 or anchor_bottom != 1.0:
+		set_anchors_preset(Control.PRESET_FULL_RECT)
+		offset_left = 0.0
+		offset_top = 0.0
+		offset_right = 0.0
+		offset_bottom = 0.0
+	queue_redraw()
 
 
 ## False when there is nothing to draw at all: a filled sprite without fill amount (Unity builds
@@ -328,7 +370,9 @@ func draws() -> bool:
 	var state: Dictionary = host.get_meta(META_GRAPHIC)
 	var sprite: Dictionary = state.get("sprite", {})
 	if sprite.is_empty():
-		return false
+		return mirror_of(host) != Vector2.ONE   # (a simple sprite on a rect of negative size)
+	if int(sprite.get("type", 0)) == TILED and mirror_of(host) != Vector2.ONE:
+		return false   # (no tiles on an axis of negative size)
 	if state.get("texture") == null and not (host is TextureRect and host.texture != null):
 		return true
 	return not (int(sprite.get("type", 0)) == FILLED and float(sprite.get("amount", 1.0)) < 0.001)
@@ -343,8 +387,10 @@ func _draw() -> void:
 	if tex == null and host is TextureRect:
 		tex = host.texture
 	var sprite: Dictionary = state.get("sprite", {})
-	if sprite.is_empty():
+	var mirror: Vector2 = mirror_of(host)
+	if sprite.is_empty() and mirror == Vector2.ONE:
 		return
+	draw_set_transform(Vector2.ZERO, 0.0, mirror)
 	if tex == null:
 		# an Image without a sprite is a rectangle in its colour (on a widget that cannot draw it)
 		draw_rect(Rect2(Vector2.ZERO, size), Color.WHITE)
@@ -354,14 +400,14 @@ func _draw() -> void:
 	match int(sprite.get("type", 0)):
 		SLICED:
 			var border: Array = sprite.get("border", [0, 0, 0, 0])
-			var sc: Vector2 = slice_scale(size, border, float(sprite.get("unit", 1.0)))
+			var sc: Vector2 = slice_scale(size, border, float(sprite.get("unit", 1.0)), mirror)
 			if sc.x <= 0.0 or sc.y <= 0.0:
 				return
-			draw_set_transform(Vector2.ZERO, 0.0, sc)
+			draw_set_transform(Vector2.ZERO, 0.0, sc * mirror)
 			RenderingServer.canvas_item_add_nine_patch(get_canvas_item(), Rect2(Vector2.ZERO, size / sc), region, (src[0] as Texture2D).get_rid(),
 				Vector2(float(border[0]), float(border[1])), Vector2(float(border[2]), float(border[3])),
 				RenderingServer.NINE_PATCH_STRETCH, RenderingServer.NINE_PATCH_STRETCH, bool(sprite.get("center", true)))
-			draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+			draw_set_transform(Vector2.ZERO, 0.0, mirror)
 		FILLED:
 			var method: int = int(sprite.get("method", 4))
 			if method > 1:
@@ -381,6 +427,9 @@ func _draw() -> void:
 			if (rects[0] as Rect2).size.x > 0.0 and (rects[0] as Rect2).size.y > 0.0:
 				draw_texture_rect_region(src[0], rects[0], Rect2(region.position + part.position, part.size))
 		TILED:
+			# (Unity counts the tiles of an axis from its size: none on a negative one)
+			if mirror != Vector2.ONE:
+				return
 			for q in tiled_quads(size, region.size, sprite.get("border", [0, 0, 0, 0]), float(sprite.get("unit", 1.0)), bool(sprite.get("center", true))):
 				var part: Rect2 = q[1]
 				draw_texture_rect_region(src[0], q[0], Rect2(region.position + part.position, part.size))

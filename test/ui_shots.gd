@@ -181,7 +181,15 @@ func _collect(c: Control, fade: Color, clips: Array, out: Array) -> void:
 		return
 	var f: Color = fade * c.modulate
 	var d: Array = _drawn(c, f)
-	out.append([c, c.get_global_transform_with_canvas(), d[0], d[1], clips, d[2] if d.size() > 2 else null, d[3] if d.size() > 3 else {}])
+	var drawn_on: Control = c
+	var drawn_xf: Transform2D = c.get_global_transform_with_canvas()
+	var helper: Control = c.get_node_or_null(Sprite.HELPER) as Control
+	if helper != null and int(d[0]) in [1, 5] and Sprite.mirror_of(c) != Vector2.ONE:
+		# a rect of negative size: the helper is as large as the rect should be and draws
+		# mirrored about the Control's origin
+		drawn_on = helper
+		drawn_xf = helper.get_global_transform_with_canvas() * Transform2D(0.0, Sprite.mirror_of(c), 0.0, Vector2.ZERO)
+	out.append([drawn_on, drawn_xf, d[0], d[1], clips, d[2] if d.size() > 2 else null, d[3] if d.size() > 3 else {}])
 	var inner: Array = clips
 	if c.clip_contents or c is ScrollContainer:
 		inner = clips.duplicate()
@@ -241,10 +249,12 @@ func _even_pixel(im: Image, at: Vector2, rx: int, ry: int):
 func _sprite_pixel(c: Control, tex: Texture2D, sprite: Dictionary, local: Vector2):
 	var src: Array = Sprite.source(tex)
 	var region: Rect2 = src[1]
+	# (`c` is the helper itself when the rect has a negative size: see _collect)
+	var mirror: Vector2 = Sprite.mirror_of(c.get_parent() as Control) if String(c.name) == Sprite.HELPER and c.get_parent() is Control else Vector2.ONE
 	match int(sprite.get("type", 0)):
 		Sprite.SLICED:
 			var border: Array = sprite.get("border", [0, 0, 0, 0])
-			var t: Vector2 = Sprite.slice_texel(local, c.size, region.size, border, float(sprite.get("unit", 1.0)))
+			var t: Vector2 = Sprite.slice_texel(local, c.size, region.size, border, float(sprite.get("unit", 1.0)), mirror)
 			if not bool(sprite.get("center", true)) and t.x > float(border[0]) and t.x < region.size.x - float(border[2]) and t.y > float(border[1]) and t.y < region.size.y - float(border[3]):
 				return null
 			return region.position + t
@@ -261,6 +271,8 @@ func _sprite_pixel(c: Control, tex: Texture2D, sprite: Dictionary, local: Vector
 				return null
 			return region.position + (rects[1] as Rect2).position + (local - dest.position) / dest.size * (rects[1] as Rect2).size
 		Sprite.TILED:
+			if mirror != Vector2.ONE:
+				return null   # (no tiles on an axis of negative size)
 			var tt = Sprite.tiled_texel(local, c.size, region.size, sprite.get("border", [0, 0, 0, 0]), float(sprite.get("unit", 1.0)), bool(sprite.get("center", true)))
 			return null if tt == null else region.position + (tt as Vector2)
 	return region.position + local / c.size * region.size

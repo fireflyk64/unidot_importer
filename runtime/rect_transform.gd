@@ -519,6 +519,9 @@ static func set_values(n: Node, v: Dictionary) -> void:
 			c.set_meta(META_RECT, extra)
 		var now_negative = extra.get("size") if extra != null else null
 		resized_below(c, was_negative != now_negative)
+		if was_negative != now_negative:
+			# (the rect has another size, the Control may not: what draws by the rect hears of it)
+			c.resized.emit()
 		var handed = p["metadata/" + String(META_CARRY)]
 		if handed is Transform3D:
 			var before = c.get_meta(META_CARRY) if c.has_meta(META_CARRY) else null
