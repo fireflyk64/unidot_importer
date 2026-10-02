@@ -876,16 +876,58 @@ func _text_styles(host: Control) -> void:
 	# outline width and an underlay offset of 0.5)
 	var styled: RichTextLabel = _text(host, {"text": "Styled", "size": 72.0, "outline": {"ratio": 0.030864, "color": Color(0.1, 0.2, 0.9, 1)},
 		"underlay": {"x": 0.061728, "y": 0.061728, "dilate": 0.0, "color": Color(0, 0, 0, 0.5)}}, Vector2(300, 90))
-	eq(styled.get_theme_constant("outline_size"), 2, "the outline of the material at 72: two units")
-	eq(styled.get_theme_color("font_outline_color"), Color(0.1, 0.2, 0.9, 1), "... in its colour")
-	eq(styled.get_theme_constant("shadow_offset_x"), 4, "the underlay is a shadow, offset to the right")
-	eq(styled.get_theme_constant("shadow_offset_y"), 4, "... and down")
-	eq(styled.get_theme_color("font_shadow_color"), Color(0, 0, 0, 0.5), "... in its colour")
+	# the ratio is half the outline's band (2.2 of 4.4 units at 72): that much lies outside the
+	# glyph's edge and as much inside. A label's outline lies outside the glyph it is drawn
+	# around, a quarter of a unit per unit of its size: the glyph is drawn thinner (the font's
+	# embolden moves an edge by embolden x size / 32; by 2 % of the size at most: 1.44) and
+	# the outline as wide as both (3.66: 15 quarters).
+	near(UiText.edge_shift(UiText.settings(styled)), -0.02, "the edge of the glyphs moves in for the half of the outline that lies inside, by 2 % of the size at most", 1e-6)
+	near(UiText.edge_shift({"outline": {"ratio": 0.012}, "dilate": 0.005}), -0.007, "... a thin outline: by all of its half, less what the material moves the edge out", 1e-6)
+	eq(styled.visible_characters, 0, "a text with an outline is drawn by the child")
+	await process_frame
+	UiText.layout(styled)
+	var styled_drawer: RichTextLabel = styled.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(styled_drawer != null, "... which exists once the text is laid out")
+	if styled_drawer != null:
+		eq(styled_drawer.get_theme_constant("outline_size"), 15, "the outline at 72: 2.2 units beyond the glyph's edge and 1.44 inside it (15 quarters)")
+		eq(styled_drawer.get_theme_color("font_outline_color"), Color(0.1, 0.2, 0.9, 1), "... in its colour")
+		var thin: FontVariation = styled_drawer.get_theme_font("normal_font") as FontVariation
+		ok(thin != null and thin != styled.get_theme_font("normal_font"), "the child's font is a variation of the text's")
+		if thin != null:
+			var own: float = (styled.get_theme_font("normal_font") as FontVariation).variation_embolden if styled.get_theme_font("normal_font") is FontVariation else 0.0
+			near(thin.variation_embolden - own, -0.64, "... whose embolden takes 1.44 off every edge at 72 (-32 x 0.02)", 1e-4)
+			eq(thin.spacing_glyph, 1, "... and whose glyphs keep their advance (0.72 of a unit each back: one)")
+		near(styled_drawer.position, Vector2(1.44, -1.44), "the thinner glyphs keep their lower left corner: the child is moved to keep their middle", 0.001)
+		eq(styled_drawer.get_theme_constant("shadow_offset_x"), 4, "the underlay is a shadow, offset to the right")
+		eq(styled_drawer.get_theme_constant("shadow_offset_y"), 4, "... and down")
+		eq(styled_drawer.get_theme_color("font_shadow_color"), Color(0, 0, 0, 0.5), "... in its colour")
+		eq(styled_drawer.get_theme_constant("shadow_outline_size"), 6, "... about the glyph's own edge: 1.44 beyond the thinner glyph (6 quarters)")
+		ok(styled.get_node_or_null(UiText.UNDERLAY) == null, "an underlay without softness needs no second child")
 	UiText.set_font_size(styled, 18.0)
-	eq(styled.get_theme_constant("outline_size"), 1, "at 18 the outline is thinner than a unit: one unit")
-	eq(styled.get_theme_constant("shadow_offset_x"), 1, "... and the shadow one unit away")
-	UiText.set_font_size(styled, 4.0)
-	eq(styled.get_theme_constant("outline_size"), 0, "... and too thin to see at 4")
+	styled_drawer = styled.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	eq(styled_drawer.get_theme_constant("outline_size"), 4, "at 18: 0.56 beyond the edge, 0.36 inside: 4 quarters")
+	eq(styled_drawer.get_theme_constant("shadow_offset_x"), 1, "... and the shadow one unit away")
+	# an underlay with softness: a group behind the text that draws it blurred
+	UiText.update(styled, {"size": 72.0, "underlay": {"x": 0.061728, "y": 0.061728, "dilate": 0.012346, "soft": 0.049383, "color": Color(0, 0, 0, 0.5)}})
+	styled_drawer = styled.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	var soft: CanvasGroup = styled.get_node_or_null(UiText.UNDERLAY) as CanvasGroup
+	ok(soft != null and soft.get_index() < styled_drawer.get_index(), "an underlay with softness is drawn by a group behind the text")
+	if soft != null:
+		var copy: RichTextLabel = soft.get_node("Text")
+		eq(copy.get_parsed_text(), "Styled", "... which holds the text")
+		eq(copy.get_theme_color("default_color"), Color(0, 0, 0, 1), "... in the underlay's colour, opaque")
+		near(soft.self_modulate.a, 0.5, "... the group is as opaque as the underlay")
+		near(copy.position - styled_drawer.position, Vector2(4.4444, 4.4444), "... offset as the underlay is", 0.001)
+		eq(copy.get_theme_constant("outline_size"), 9, "... as far out as the underlay reaches: its dilate and what the glyph is thinner by (2.3 units)")
+		near(float(soft.get_meta(&"unidot_soft")), 3.5556, "... blurred over the width of the softness (3.6 units)", 0.001)
+		eq(styled_drawer.get_theme_color("font_shadow_color").a, 0.0, "the text itself has no shadow then")
+	UiText.update(styled, {"underlay": null, "outline": null, "dilate": 0.02})
+	styled_drawer = styled.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(styled.get_node_or_null(UiText.UNDERLAY) == null, "without the underlay the group is gone")
+	ok(styled_drawer != null and styled_drawer.get_theme_font("normal_font") is FontVariation, "a material that only dilates the face: a wider variation of the font")
+	if styled_drawer != null and styled_drawer.get_theme_font("normal_font") is FontVariation:
+		var base_embolden: float = (styled.get_theme_font("normal_font") as FontVariation).variation_embolden if styled.get_theme_font("normal_font") is FontVariation else 0.0
+		near((styled_drawer.get_theme_font("normal_font") as FontVariation).variation_embolden - base_embolden, 0.64, "... its edges 0.02 of the size further out", 1e-4)
 	var bare: RichTextLabel = _text(host, {"text": "Bare", "size": 20.0}, Vector2(300, 40))
 	ok(not bare.has_theme_constant_override("outline_size") and not bare.has_theme_color_override("font_shadow_color"), "a text without such a material has neither")
 	# the first visible character

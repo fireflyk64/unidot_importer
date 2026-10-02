@@ -194,6 +194,8 @@ func _tmp_material(mat: RefCounted) -> Dictionary:
 		"underlay_x": _to_float(floats.get("_UnderlayOffsetX", 0.0)) * ratio_c,
 		"underlay_y": _to_float(floats.get("_UnderlayOffsetY", 0.0)) * ratio_c,
 		"underlay_dilate": _to_float(floats.get("_UnderlayDilate", 0.0)) * ratio_c * 0.5,
+		"underlay_soft": _to_float(floats.get("_UnderlaySoftness", 0.0)) * ratio_c,
+		"dilate": _to_float(floats.get("_FaceDilate", 0.0)) * ratio_a * 0.5,
 		"underlay_color": colors.get("_UnderlayColor", Color(0, 0, 0, 0.5)),
 	}
 
@@ -1586,7 +1588,10 @@ func _tmp_assets(settings: Dictionary, keys: Dictionary, obj: RefCounted, ctl: C
 			settings["outline"] = {"ratio": float(material["outline"]) * unit, "color": material.get("outline_color", Color.BLACK)}
 		if bool(material.get("underlay", false)):
 			settings["underlay"] = {"x": float(material.get("underlay_x", 0.0)) * unit, "y": -float(material.get("underlay_y", 0.0)) * unit,
-				"dilate": float(material.get("underlay_dilate", 0.0)) * unit, "color": material.get("underlay_color", Color(0, 0, 0, 0.5))}
+				"dilate": float(material.get("underlay_dilate", 0.0)) * unit, "soft": float(material.get("underlay_soft", 0.0)) * unit,
+				"color": material.get("underlay_color", Color(0, 0, 0, 0.5))}
+		if not is_zero_approx(float(material.get("dilate", 0.0))):
+			settings["dilate"] = float(material["dilate"]) * unit
 	var sprite_ref: Array = obj.get_ref(keys, "m_spriteAsset")
 	if (sprite_ref.size() < 3 or sprite_ref[1] == 0) and str(_tmp_settings_asset().get("sprites", "")) != "":
 		sprite_ref = [null, 11400000, str(_tmp_settings_asset()["sprites"]), 2]   # the project's default sprite asset

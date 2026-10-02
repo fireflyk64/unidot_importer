@@ -267,6 +267,10 @@ static func apply(ctl: Node) -> void:
 		if drawer != null:
 			drawer.add_theme_color_override("default_color", own)
 			drawer.self_modulate = ctl.self_modulate
+		# ... and a soft underlay by a group behind it, as opaque as the underlay's colour says
+		var underlay: CanvasItem = ctl.get_node_or_null(^"UnidotTextUnderlay") as CanvasItem
+		if underlay != null:
+			underlay.self_modulate = Color(1.0, 1.0, 1.0, float(underlay.get_meta(&"unidot_alpha", 1.0)) * ctl.self_modulate.a)
 	elif ctl is Label3D:
 		ctl.modulate = c
 	elif ctl is ColorRect:

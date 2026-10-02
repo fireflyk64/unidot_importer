@@ -21,8 +21,11 @@ extends RefCounted
 ##    is drawn of the text as it is laid out; absent or negative: all of it),
 ##    page: int (overflow mode 5: the page that is shown, from 1),
 ##    linked: NodePath (overflow mode 6: the text that goes on where this one ends),
-##    outline: {ratio, color} and underlay: {x, y, dilate, color} (what the material of a
-##    TextMeshPro font draws around the glyphs; lengths in font sizes, y down),
+##    outline: {ratio, color} and underlay: {x, y, dilate, soft, color} (what the material of
+##    a TextMeshPro font draws around the glyphs; lengths in font sizes, y down; the
+##    outline's ratio is half its width: what lies outside the glyph's edge, as much lies
+##    inside; soft: the width of the ramp the underlay fades over),
+##    dilate: float (how far the material moves the edge of the glyphs out, in font sizes),
 ##    unit: float (the gradient scale of the font's atlas per unit of font size: the measure
 ##    of the material's numbers),
 ##    sprites: a Resource whose `unidot_tmp_sprites` metadata describes a TextMeshPro sprite
@@ -45,6 +48,17 @@ extends RefCounted
 ## the alignment, while the node itself keeps the Unity rect and the text. A text with margins
 ## is laid out in another rect than the node's: the same child draws it, there.
 ##
+## The outline of a TextMeshPro material is a band about the glyph's edge, half inside and half
+## outside; a label's outline lies outside the glyph it is drawn around. So the glyphs are
+## drawn that much thinner (a variation of the font: its embolden, which moves every edge by
+## embolden x size / 32 and leaves the lower left corner of a glyph where it is) and the
+## outline twice as wide; a label's `outline_size` N is N / 4 wide. The glyphs are not made
+## thinner than INNER of the font size, though: the font's embolden is no true offset, and
+## thin strokes break up beyond that; the outline covers what the glyph keeps. The child draws such a text
+## too. An underlay with softness is drawn by a second child, a CanvasGroup that holds the text
+## in the underlay's colour and blurs it ("UnidotTextUnderlay", ui_text_underlay.gdshader),
+## where the ramp is SOFT pixels wide at least; a narrower one is the label's own shadow.
+##
 ## Godot draws text at whole font sizes, 1 at least. A text smaller than SMALL (a canvas whose
 ## units are metres has font sizes like 0.022) is laid out at RASTER by that child, in a rect
 ## that many times larger, and the child is scaled down to the size the text has in Unity.
@@ -53,6 +67,12 @@ const RT := preload("./rect_transform.gd")
 const META := &"unidot_text"
 const HELPER := "UnidotText"
 const DRAWER := "UnidotTextOverflow"
+const UNDERLAY := "UnidotTextUnderlay"
+## The most the glyphs are thinned by for the inner half of an outline, in font sizes.
+const INNER := 0.02
+## The narrowest ramp of an underlay that is drawn blurred, in pixels of the viewport.
+const SOFT := 1.5
+const UNDERLAY_SHADER := preload("./ui_text_underlay.gdshader")
 const SMALL := 4.0
 ## The ascent of Liberation Sans per unit of font size (TextMeshPro's default font).
 const ASCENT := 0.905
@@ -193,9 +213,10 @@ static func render(n: Node) -> void:
 
 ## Shows the text on a label at a font size of the label's own (`k`: how many times larger than
 ## in Unity that is, see `raster`).
-static func _show(n: RichTextLabel, s: Dictionary, size: float, k: float = 1.0) -> void:
+## `fonts`: the label whose fonts are the text's, when `n` is the child that draws it.
+static func _show(n: RichTextLabel, s: Dictionary, size: float, k: float = 1.0, fonts: RichTextLabel = null) -> void:
 	_rich_font_size(n, maxi(int(round(size)), 1))
-	_effects(n, s, size)
+	_effects(n, s, size, fonts)
 	_spacing(n, s, size)
 	n.text = to_bbcode(str(s["text"]), bool(s["rich"]), int(s["style"]), size, bool(s["tmp"]), -1, "", _options(s, 0, false, k))
 
@@ -222,7 +243,34 @@ static func raster(s: Dictionary, n: Node = null) -> float:
 ## Is the text drawn by the child whatever its rect: it has margins, or it is (or may be
 ## fitted to) a size below a font's.
 static func _by_child(s: Dictionary) -> bool:
-	return _has_margins(s) or float(s.get("min", 1.0) if bool(s.get("auto", false)) else s.get("size", 14.0)) < SMALL
+	return _has_margins(s) or _has_effects(s) or float(s.get("min", 1.0) if bool(s.get("auto", false)) else s.get("size", 14.0)) < SMALL
+
+
+## Does a material draw about the glyphs (an outline, an underlay) or move their edge?
+static func _has_effects(s: Dictionary) -> bool:
+	var outline = s.get("outline")
+	return (outline is Dictionary and float(outline.get("ratio", 0.0)) > 0.0) or s.get("underlay") is Dictionary or not is_zero_approx(float(s.get("dilate", 0.0)))
+
+
+## How far the edge of the glyphs is moved, in font sizes (negative: in): out by the
+## material's dilate, in by the half of the outline that lies inside the glyph.
+static func edge_shift(s: Dictionary) -> float:
+	return float(s.get("dilate", 0.0)) - _inner(s)
+
+
+## The width of the ramp an underlay fades over, in pixels of the viewport, on the label that
+## draws the text at the font size `size` (0 outside the tree: nothing is drawn there).
+static func soft_pixels(label: Control, s: Dictionary, size: float) -> float:
+	var underlay = s.get("underlay")
+	if not (underlay is Dictionary) or not label.is_inside_tree():
+		return 0.0
+	return float(underlay.get("soft", 0.0)) * size * label.get_global_transform_with_canvas().get_scale().x
+
+
+## How much thinner the glyphs are drawn for the inner half of the outline, in font sizes.
+static func _inner(s: Dictionary) -> float:
+	var outline = s.get("outline")
+	return minf(maxf(float(outline.get("ratio", 0.0)), 0.0), INNER) if outline is Dictionary else 0.0
 
 
 static func _has_margins(s: Dictionary) -> bool:
@@ -239,18 +287,66 @@ static func _units(ratio: float, size: float) -> int:
 	return int(signf(v)) * maxi(roundi(absf(v)), 1)
 
 
-## The outline and the underlay of a TextMeshPro material: the label's outline and shadow.
-static func _effects(n: RichTextLabel, s: Dictionary, size: float) -> void:
+## A width about the glyphs as a label's outline size: four per unit; what can be seen at all
+## is one at least.
+static func _quarters(width: float) -> int:
+	if width < 0.05:
+		return 0
+	return maxi(roundi(width * 4.0), 1)
+
+
+## What a TextMeshPro material draws about the glyphs, on the label that draws the text:
+## the outline (half of its band outside the glyph's edge, the glyph thinner by the other
+## half), the underlay as the label's shadow (one without softness), the edge moved by the
+## material's dilate. `size`: the label's font size; `fonts`: the label whose fonts are the
+## text's, when `n` is the child that draws it (its fonts are variations of those).
+static func _effects(n: RichTextLabel, s: Dictionary, size: float, fonts: RichTextLabel = null) -> void:
 	var outline = s.get("outline")
+	var half: float = float(outline.get("ratio", 0.0)) * size if outline is Dictionary else 0.0
+	# (how far the edge of the glyph that is drawn lies inside the glyph's own)
+	var inner: float = _inner(s) * size
+	if fonts != null:
+		var embolden: float = 32.0 * edge_shift(s)
+		for item in ["normal_font", "bold_font", "italics_font", "bold_italics_font"]:
+			if not fonts.has_theme_font_override(item):
+				continue
+			var base: Font = fonts.get_theme_font(item)
+			if is_zero_approx(embolden):
+				n.add_theme_font_override(item, base)
+				continue
+			var now: Font = n.get_theme_font(item) if n.has_theme_font_override(item) else null
+			var variation: FontVariation = now as FontVariation
+			if variation == null or int(variation.get_meta(&"unidot_edge_of", 0)) != base.get_instance_id():
+				# (a variation of a variation would lose what the first one says: a copy of it)
+				variation = (base as FontVariation).duplicate() if base is FontVariation else FontVariation.new()
+				if not (base is FontVariation):
+					variation.base_font = base
+				variation.set_meta(&"unidot_edge_of", base.get_instance_id())
+				n.add_theme_font_override(item, variation)
+			var own: float = (base as FontVariation).variation_embolden if base is FontVariation else 0.0
+			var spacing: int = (base as FontVariation).spacing_glyph if base is FontVariation else 0
+			if not is_equal_approx(variation.variation_embolden, own + embolden):
+				variation.variation_embolden = own + embolden
+			# (an emboldened glyph is that much wider to the text: taken back)
+			var even: int = spacing - roundi(embolden * size / 64.0)
+			if variation.spacing_glyph != even:
+				variation.spacing_glyph = even
 	if outline is Dictionary:
-		n.add_theme_constant_override("outline_size", _units(float(outline.get("ratio", 0.0)), size))
+		n.add_theme_constant_override("outline_size", _quarters(half + inner))
 		n.add_theme_color_override("font_outline_color", outline.get("color", Color.BLACK))
 	var underlay = s.get("underlay")
 	if underlay is Dictionary:
-		n.add_theme_color_override("font_shadow_color", underlay.get("color", Color(0, 0, 0, 0.5)))
-		n.add_theme_constant_override("shadow_offset_x", _units(float(underlay.get("x", 0.0)), size))
-		n.add_theme_constant_override("shadow_offset_y", _units(float(underlay.get("y", 0.0)), size))
-		n.add_theme_constant_override("shadow_outline_size", _units(float(underlay.get("dilate", 0.0)), size))
+		if fonts != null and soft_pixels(n, s, size) >= SOFT:
+			# (drawn by the second child, blurred)
+			n.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0))
+			n.add_theme_constant_override("shadow_outline_size", 0)
+		else:
+			n.add_theme_color_override("font_shadow_color", underlay.get("color", Color(0, 0, 0, 0.5)))
+			n.add_theme_constant_override("shadow_offset_x", _units(float(underlay.get("x", 0.0)), size))
+			n.add_theme_constant_override("shadow_offset_y", _units(float(underlay.get("y", 0.0)), size))
+			# (the underlay's edge is the glyph's edge moved by the two dilates; the glyph
+			# that is drawn is thinner by half the outline)
+			n.add_theme_constant_override("shadow_outline_size", _quarters(float(underlay.get("dilate", 0.0)) * size + inner))
 
 
 ## The room between lines: TextMeshPro's line spacing is in hundredths of the font size,
@@ -330,8 +426,10 @@ static func _drawer(n: RichTextLabel, drawer: RichTextLabel, wrap: bool) -> Rich
 		drawer.scroll_active = false
 		drawer.clip_contents = false
 		n.add_child(drawer)
+	var plain: bool = not n.has_meta(META) or not _has_effects(settings(n))
 	for item in ["normal_font", "bold_font", "italics_font", "bold_italics_font"]:
-		if n.has_theme_font_override(item):
+		# (the fonts of a text with an outline are variations of the node's: see _effects)
+		if plain and n.has_theme_font_override(item):
 			drawer.add_theme_font_override(item, n.get_theme_font(item))
 	for item in ["normal_font_size", "bold_font_size", "italics_font_size", "bold_italics_font_size", "mono_font_size"]:
 		drawer.add_theme_font_size_override(item, n.get_theme_font_size(item))
@@ -356,7 +454,9 @@ static func _laid_out(n: RichTextLabel, s: Dictionary, box: Rect2, k: float) -> 
 		return n
 	var drawer: RichTextLabel = _drawer(n, n.get_node_or_null(DRAWER) as RichTextLabel, bool(s.get("wrap", true)))
 	if k != 1.0:
-		_show(drawer, s, drawn_font_size(n) * k, k)
+		_show(drawer, s, drawn_font_size(n) * k, k, n)
+	elif _has_effects(s):
+		_effects(drawer, s, float(drawer.get_theme_font_size("normal_font_size")), n)
 	drawer.size = Vector2(box.size.x * k, maxf(drawer.size.y, 1.0))
 	drawer.scale = Vector2.ONE / k
 	return drawer
@@ -392,6 +492,7 @@ static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
 		if drawer != null:
 			n.remove_child(drawer)
 			drawer.queue_free()
+		_underlay(n, null, s, k)
 		# (a text that only the child can draw stays hidden until it is laid out)
 		if not _by_child(s):
 			n.visible_characters = _shown_characters(n, s, -1) if ready else -1
@@ -454,8 +555,74 @@ static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
 			y = (box.size.y - shown / k) * 0.5
 		VERTICAL_ALIGNMENT_BOTTOM:
 			y = box.size.y - shown / k
-	drawer.position = box.position + Vector2(0.0, y)
+	# (a glyph whose edge is moved keeps its lower left corner: moved back about its middle)
+	var moved: float = edge_shift(s) * float(drawer.get_theme_font_size("normal_font_size")) / k
+	drawer.position = box.position + Vector2(-moved, y + moved)
 	n.visible_characters = 0   # the node keeps the text (and measures it) but does not draw it
+	_underlay(n, drawer, s, k)
+
+
+## The underlay of a text whose material gives it softness: a second child behind the one
+## that draws the text, a group that holds the same text in the underlay's colour, as far out
+## as the underlay reaches, and draws it blurred over the width of the softness. Without
+## softness the label's own shadow is the underlay.
+static func _underlay(n: RichTextLabel, drawer: RichTextLabel, s: Dictionary, k: float) -> void:
+	var underlay = s.get("underlay")
+	var soft: float = float(underlay.get("soft", 0.0)) if underlay is Dictionary else 0.0
+	var group: CanvasGroup = n.get_node_or_null(UNDERLAY) as CanvasGroup
+	if drawer == null or soft_pixels(drawer, s, float(drawer.get_theme_font_size("normal_font_size"))) < SOFT:
+		if group != null:
+			n.remove_child(group)
+			group.queue_free()
+		return
+	if group == null:
+		group = CanvasGroup.new()
+		group.name = UNDERLAY
+		group.set_meta(RT.META_HELPER, true)
+		var material := ShaderMaterial.new()
+		material.shader = UNDERLAY_SHADER
+		group.material = material
+		var copy := RichTextLabel.new()
+		copy.name = "Text"
+		copy.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		copy.bbcode_enabled = true
+		copy.scroll_active = false
+		copy.clip_contents = false
+		group.add_child(copy)
+		n.add_child(group)
+		n.move_child(group, 0)
+	var label: RichTextLabel = group.get_node("Text")
+	var size: float = float(drawer.get_theme_font_size("normal_font_size"))
+	for item in ["normal_font", "bold_font", "italics_font", "bold_italics_font"]:
+		if drawer.has_theme_font_override(item):
+			label.add_theme_font_override(item, drawer.get_theme_font(item))
+	for item in ["normal_font_size", "bold_font_size", "italics_font_size", "bold_italics_font_size", "mono_font_size"]:
+		label.add_theme_font_size_override(item, drawer.get_theme_font_size(item))
+	if drawer.has_theme_constant_override("line_separation"):
+		label.add_theme_constant_override("line_separation", drawer.get_theme_constant("line_separation"))
+	var color: Color = underlay.get("color", Color(0, 0, 0, 0.5))
+	label.add_theme_color_override("default_color", Color(color.r, color.g, color.b, 1.0))
+	label.add_theme_color_override("font_outline_color", Color(color.r, color.g, color.b, 1.0))
+	label.add_theme_constant_override("outline_size", _quarters((float(underlay.get("dilate", 0.0)) + _inner(s)) * size))
+	label.autowrap_mode = drawer.autowrap_mode
+	label.horizontal_alignment = drawer.horizontal_alignment
+	label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	# (every glyph in the one colour: the colours of the text are not the underlay's)
+	var colors := RegEx.create_from_string("\\[/?color[^\\]]*\\]")
+	label.text = colors.sub(drawer.text, "", true)
+	label.visible_characters = drawer.visible_characters
+	label.size = drawer.size
+	label.scale = drawer.scale
+	label.position = drawer.position + Vector2(float(underlay.get("x", 0.0)), float(underlay.get("y", 0.0))) * size / k
+	group.set_meta(&"unidot_alpha", color.a)
+	group.self_modulate = Color(1.0, 1.0, 1.0, color.a * n.self_modulate.a)
+	# the blur: a disc as wide as the softness, in pixels of the viewport
+	var width: float = soft * size / k
+	var pixels: float = soft_pixels(drawer, s, size)
+	(group.material as ShaderMaterial).set_shader_parameter(&"radius", pixels * 0.5)
+	group.set_meta(&"unidot_soft", width)
+	group.fit_margin = ceilf(pixels * 0.5) + 2.0
+	group.clear_margin = ceilf(pixels * 0.5) + 2.0
 
 
 ## How many characters a laid out text shows: those its overflow mode leaves (`characters`,
@@ -607,7 +774,7 @@ static func _fits(n: RichTextLabel, s: Dictionary, box: Rect2, size: float) -> b
 		laid = _drawer(n, n.get_node_or_null(DRAWER) as RichTextLabel, bool(s.get("wrap", true)))
 		laid.size = Vector2(box.size.x * k, maxf(laid.size.y, 1.0))
 		laid.scale = Vector2.ONE / k
-	_show(laid, s, size * k, k)
+	_show(laid, s, size * k, k, n if laid != n else null)
 	return laid.get_content_height() <= box.size.y * k + 0.5 and laid.get_content_width() <= box.size.x * k + 0.5
 
 

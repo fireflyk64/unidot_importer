@@ -126,13 +126,33 @@ static func _walk(n: Node, prefix: String, out: Array, spatial: Array) -> void:
 		e["raster"] = k
 		e["font_size"] = UiText.drawn_font_size(ctl)
 		e["font"] = font_family(ctl.get_theme_font("normal_font"))
-		# what is drawn around the glyphs, the fonts behind the font, the pictures in the text
-		if shown.has_theme_constant_override("outline_size") and shown.get_theme_constant("outline_size") > 0:
-			var oc: Color = shown.get_theme_color("font_outline_color")
-			e["outline"] = [shown.get_theme_constant("outline_size") / k, oc.r, oc.g, oc.b, oc.a]
-		if shown.has_theme_color_override("font_shadow_color") and shown.get_theme_color("font_shadow_color").a > 0.0:
-			var sc: Color = shown.get_theme_color("font_shadow_color")
-			e["shadow"] = [shown.get_theme_constant("shadow_offset_x") / k, shown.get_theme_constant("shadow_offset_y") / k, sc.r, sc.g, sc.b, sc.a]
+		# what is drawn around the glyphs, the fonts behind the font, the pictures in the text.
+		# (A text with an outline or an underlay is drawn by the child too; a label's outline
+		# size is in quarters of a unit and lies about the glyph that is drawn, which is
+		# thinner than the font's: the width about that glyph is reported, and the embolden.)
+		var effects: RichTextLabel = drawer if drawer != null else ctl
+		var ek: float = k if drawer != null else 1.0
+		if effects.has_theme_constant_override("outline_size") and effects.get_theme_constant("outline_size") > 0:
+			var oc: Color = effects.get_theme_color("font_outline_color")
+			e["outline"] = [effects.get_theme_constant("outline_size") / 4.0 / ek, oc.r, oc.g, oc.b, oc.a]
+		var own_font: Font = ctl.get_theme_font("normal_font")
+		var drawn_font: Font = effects.get_theme_font("normal_font")
+		e["embolden"] = ((drawn_font as FontVariation).variation_embolden if drawn_font is FontVariation else 0.0) - ((own_font as FontVariation).variation_embolden if own_font is FontVariation else 0.0)
+		var soft: CanvasGroup = ctl.get_node_or_null("UnidotTextUnderlay") as CanvasGroup
+		if soft != null and drawer != null:
+			var copy: RichTextLabel = soft.get_node("Text")
+			var uc: Color = copy.get_theme_color("default_color")
+			var at: Vector2 = copy.position - drawer.position
+			e["shadow"] = [at.x, at.y, uc.r, uc.g, uc.b, float(soft.get_meta(&"unidot_alpha", 1.0))]
+			e["shadow_soft"] = float(soft.get_meta(&"unidot_soft", 0.0))
+		# (a ramp narrower than a pixel and a half is not blurred: how wide it would be)
+		if drawer != null and ctl.has_meta(UiText.META):
+			e["shadow_soft_pixels"] = UiText.soft_pixels(drawer, UiText.settings(ctl), float(drawer.get_theme_font_size("normal_font_size")))
+		if soft != null and drawer != null:
+			pass
+		elif effects.has_theme_color_override("font_shadow_color") and effects.get_theme_color("font_shadow_color").a > 0.0:
+			var sc: Color = effects.get_theme_color("font_shadow_color")
+			e["shadow"] = [effects.get_theme_constant("shadow_offset_x") / ek, effects.get_theme_constant("shadow_offset_y") / ek, sc.r, sc.g, sc.b, sc.a]
 		var fallbacks: Array = []
 		var shown_font: Font = ctl.get_theme_font("normal_font")
 		for fallback in (shown_font.fallbacks if shown_font != null else []):
