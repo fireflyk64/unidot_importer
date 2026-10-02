@@ -166,7 +166,10 @@ static func _walk(n: Node, prefix: String, out: Array, spatial: Array) -> void:
 		# where the text is laid out (a text with margins: by its drawing child) and the room
 		# between its lines
 		if drawer != null:
-			e["text_box"] = [drawer.position.x, drawer.position.y, drawer.size.x / k, drawer.size.y / k, drawer.get_line_count()]
+			# (the child of a text whose glyphs are drawn thinner or wider is moved to keep
+			# their middle: where the text is laid out is without that)
+			var moved: float = UiText.edge_shift(UiText.settings(ctl)) * float(drawer.get_theme_font_size("normal_font_size")) / k if ctl.has_meta(UiText.META) else 0.0
+			e["text_box"] = [drawer.position.x + moved, drawer.position.y - moved, drawer.size.x / k, drawer.size.y / k, drawer.get_line_count()]
 		e["valign"] = int(ctl.vertical_alignment)
 		e["line_spacing"] = (shown.get_theme_constant("line_separation") / k) if shown.has_theme_constant_override("line_separation") else 0.0
 		var line_font: Font = shown.get_theme_font("normal_font")
