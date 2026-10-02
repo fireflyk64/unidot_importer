@@ -27,7 +27,9 @@ extends RefCounted
 ##    of the material's numbers),
 ##    sprites: a Resource whose `unidot_tmp_sprites` metadata describes a TextMeshPro sprite
 ##    asset ({point, scale, names: {name: index}, list: [{rect, width, height, scale}]}),
-##    sprite_sheet: Texture2D (its picture)}
+##    sprite_sheet: Texture2D (its picture),
+##    ascent: float (the ascent of the text's font per unit of font size: what the sprites of
+##    an asset without face metrics are sized by)}
 ## Font styles are TextMeshPro's: 1 bold, 2 italic, 4 underline, 8 lower case, 16 upper case,
 ## 32 small caps, 64 strikethrough (uGUI's FontStyle has the same two lowest bits).
 ##
@@ -52,6 +54,8 @@ const META := &"unidot_text"
 const HELPER := "UnidotText"
 const DRAWER := "UnidotTextOverflow"
 const SMALL := 4.0
+## The ascent of Liberation Sans per unit of font size (TextMeshPro's default font).
+const ASCENT := 0.905
 const RASTER := 32.0
 
 ## Regular, bold, italic, bold italic: a family with the metrics of Liberation Sans, which is
@@ -198,7 +202,7 @@ static func _show(n: RichTextLabel, s: Dictionary, size: float, k: float = 1.0) 
 
 ## What to_bbcode needs beside the text: where it starts, the sprites of its <sprite> tags.
 static func _options(s: Dictionary, skip: int = 0, trim: bool = false, k: float = 1.0) -> Dictionary:
-	return {"skip": int(s.get("first", 0)) + skip, "trim": trim, "sprites": s.get("sprites"), "sprite_sheet": s.get("sprite_sheet"), "scale": k}
+	return {"skip": int(s.get("first", 0)) + skip, "trim": trim, "sprites": s.get("sprites"), "sprite_sheet": s.get("sprite_sheet"), "scale": k, "ascent": float(s.get("ascent", ASCENT))}
 
 
 ## How many times larger than in Unity a text of that size is laid out (see above): 1 for a
@@ -828,7 +832,11 @@ static func _sprite(value: String, size: float, options: Dictionary) -> String:
 	var sprite: Dictionary = list[index]
 	var rect: Rect2 = sprite.get("rect", Rect2())
 	var point: float = float(info.get("point", 0.0))
-	var k: float = (size / point if point > 0.0 else 1.0) * float(info.get("scale", 1.0)) * float(sprite.get("scale", 1.0))
+	var k: float = size / point * float(info.get("scale", 1.0)) * float(sprite.get("scale", 1.0)) if point > 0.0 else 0.0
+	if point <= 0.0:
+		# an asset without face metrics: the sprite is as high as the ascent of the text's
+		# font, times its scale
+		k = float(options.get("ascent", ASCENT)) * size / maxf(float(sprite.get("height", rect.size.y)), 1e-6) * float(sprite.get("scale", 1.0))
 	# (the rect is Unity's: its y is from the bottom of the sheet)
 	return "[img width=%d height=%d region=%d,%d,%d,%d]%s[/img]" % [maxi(roundi(float(sprite.get("width", rect.size.x)) * k), 1), maxi(roundi(float(sprite.get("height", rect.size.y)) * k), 1),
 		int(rect.position.x), int(float((sheet as Texture2D).get_height()) - rect.position.y - rect.size.y), int(rect.size.x), int(rect.size.y), (sheet as Texture2D).resource_path]

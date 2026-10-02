@@ -299,10 +299,24 @@ func handle_scripted_object(obj: RefCounted):
 		"bold": _to_float(keys.get("boldStyle", 0.75)), "bold_spacing": _to_float(keys.get("boldSpacing", 7.0)),
 		"italic": _to_float(keys.get("italicStyle", 35.0)),
 		"point": _to_float(face.get("m_PointSize", (keys["m_fontInfo"] as Dictionary).get("PointSize", 0.0) if keys.get("m_fontInfo") is Dictionary else 0.0)),
+		"ascent": _face_ascent(face, keys.get("m_fontInfo")),
 		"material": material, "fallbacks": fallbacks,
 	})
 	stats["font_assets"] = int(stats.get("font_assets", 0)) + 1
 	return font
+
+
+## The ascent of a font asset per unit of font size (its face info; `old`: the m_fontInfo of
+## assets made before TextMeshPro 1.4). 0 when the asset does not say.
+func _face_ascent(face: Dictionary, old) -> float:
+	var point: float = _to_float(face.get("m_PointSize", 0.0))
+	var ascent: float = _to_float(face.get("m_AscentLine", 0.0))
+	var scale: float = _to_float(face.get("m_Scale", 1.0))
+	if point <= 0.0 and old is Dictionary:
+		point = _to_float(old.get("PointSize", 0.0))
+		ascent = _to_float(old.get("Ascender", 0.0))
+		scale = _to_float(old.get("Scale", 1.0))
+	return ascent / point * (scale if scale > 0.0 else 1.0) if point > 0.0 and ascent > 0.0 else 0.0
 
 
 func post_process_avatar(_obj: RefCounted, _state: RefCounted, _node: Node, _avatar_meta: RefCounted):
@@ -637,6 +651,23 @@ static func plain_values(keys: Dictionary, parent: Control) -> Dictionary:
 	return v
 
 
+## The index of a Transform among the children of its parent (Unity's sibling order: the
+## parent's m_Children); -1 when the parent does not list it.
+func _sibling_index(transform) -> int:
+	var parent_ref = transform.parent_ref
+	if not (parent_ref is Array) or parent_ref.size() < 2 or parent_ref[1] == 0:
+		return -1
+	var parent = transform.meta.lookup(parent_ref)
+	if parent == null or not (parent.keys.get("m_Children") is Array):
+		return -1
+	var index: int = 0
+	for ref in parent.keys["m_Children"]:
+		if ref is Array and ref.size() >= 2 and ref[1] == transform.fileID:
+			return index
+		index += 1
+	return -1
+
+
 ## GameObjects with a RectTransform become Controls; the class follows the main UI component.
 ## A plain Transform inside a canvas that has RectTransforms below it becomes a Control too: it
 ## has no rect, but what is below it is UI of that canvas, laid out against no parent rect.
@@ -655,6 +686,8 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 			var spatial := Node3D.new()
 			transform.configure_node(spatial)
 			spatial.name = go.name
+			var place: int = _sibling_index(transform)
+			spatial.set_meta(RT.META_SIBLING, place if place >= 0 else RT.next_sibling(new_parent))
 			state.add_child(spatial, RT.frame_of(new_parent, true, frame_script, state.owner), transform)
 			stats["spatial"] = int(stats.get("spatial", 0)) + 1
 			return spatial
@@ -1551,6 +1584,10 @@ func _tmp_assets(settings: Dictionary, keys: Dictionary, obj: RefCounted, ctl: C
 			if sheet != null:
 				settings["sprites"] = asset
 				settings["sprite_sheet"] = sheet
+				# an asset without face metrics sizes its sprites by the ascent of the text's
+				# font (TextMeshPro's default font, Liberation Sans, when the asset is not known)
+				if float(((asset as Resource).get_meta(META_TMP_SPRITES) as Dictionary).get("point", 0.0)) <= 0.0:
+					settings["ascent"] = float(info["ascent"]) if float(info.get("ascent", 0.0)) > 0.0 else UiText.ASCENT
 
 
 ## A text component on its Control: the settings go to the `unidot_text` metadata and

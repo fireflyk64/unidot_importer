@@ -48,6 +48,8 @@ const META_HELPER := &"unidot_helper"
 ## has the rect. Its children are children of the Control for scripts.
 const META_FRAME := &"unidot_frame"
 const FRAME := "Unidot3D"
+## On a 3D object in the frame of a UI object: its index among the object's child GameObjects.
+const META_SIBLING := &"unidot_sibling"
 const META_PLAIN := &"unidot_plain_transform"
 const META_CARRY := &"unidot_carry"
 const GROUP_UI_SHAPE := &"unidot_ui_shape"
@@ -150,27 +152,48 @@ static func logical_parent(n: Node) -> Node:
 	return identity(p)
 
 
-## Child GameObjects of a UI node, in sibling order (helper nodes are left out).
+## Child GameObjects of a UI node, in sibling order (helper nodes are left out). The 3D objects
+## among them hang in the object's 3D frame: one that knows its place among its siblings
+## (META_SIBLING, the importer's) stands there; the other nodes of the frame (the object's
+## components among them: the caller's to tell) come last.
 static func logical_children(n: Node) -> Array:
+	var found: Array = _children(n)
+	return (found[0] as Array) + (found[1] as Array)
+
+
+## The place a new child GameObject of a UI node gets among its siblings: after those it has.
+static func next_sibling(n: Node) -> int:
+	return (_children(n)[0] as Array).size()
+
+
+## → [the child GameObjects in sibling order, the other nodes of the 3D frame]
+static func _children(n: Node) -> Array:
 	var out: Array = []
+	var rest: Array = []
 	if n == null:
-		return out
+		return [out, rest]
 	var s: Node = store(n)
 	var hosts: Array = [s]
 	if s.has_meta(META_CANVAS):
 		var r: Control = root_control(s)
 		hosts = [r, s] if r != null else [s]
+	var placed: Array = []
 	for host in hosts:
 		for c in host.get_children():
 			if c.has_meta(META_FRAME):
-				# the 3D nodes of the object (its components among them: the caller's to tell)
 				for under in c.get_children():
-					out.append(under)
+					if under.has_meta(META_SIBLING):
+						placed.append(under)
+					else:
+						rest.append(under)
 				continue
 			if c.has_meta(META_HELPER):
 				continue
 			out.append(identity(c))
-	return out
+	placed.sort_custom(func(a: Node, b: Node) -> bool: return int(a.get_meta(META_SIBLING)) < int(b.get_meta(META_SIBLING)))
+	for under in placed:
+		out.insert(clampi(int(under.get_meta(META_SIBLING)), 0, out.size()), under)
+	return [out, rest]
 
 
 ## The 3D frame of a UI object (see META_FRAME), made when `create` says so. `script`: this

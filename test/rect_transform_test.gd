@@ -675,6 +675,36 @@ func _text(parent: Node, settings: Dictionary, size: Vector2) -> RichTextLabel:
 	return t
 
 
+## A 3D object among the UI children of an object hangs in the object's 3D frame and keeps its
+## place among the siblings.
+func _sibling_order(host: Control) -> void:
+	var parent := Control.new()
+	host.add_child(parent)
+	var first := Control.new()
+	first.name = "First"
+	parent.add_child(first)
+	eq(RT.next_sibling(parent), 1, "the place of the next child GameObject: after the one there is")
+	var frame: Node3D = RT.frame_of(parent, true)
+	var sound := Node3D.new()   # (a component of the object itself: no place among the children)
+	sound.name = "Sound"
+	frame.add_child(sound)
+	var spatial := Node3D.new()
+	spatial.name = "Spatial"
+	spatial.set_meta(RT.META_SIBLING, RT.next_sibling(parent))
+	frame.add_child(spatial)
+	var last := Control.new()
+	last.name = "Last"
+	parent.add_child(last)
+	eq(RT.next_sibling(parent), 3, "... counting the 3D object, not the component")
+	var names: Array = []
+	for c in RT.logical_children(parent):
+		names.append(String(c.name))
+	eq(names, ["First", "Spatial", "Last", "Sound"], "a 3D object keeps its place among the UI children; what else hangs in the frame comes last")
+	eq(RT.logical_parent(spatial), parent, "... and its parent is the UI object")
+	host.remove_child(parent)
+	parent.free()
+
+
 ## TextMeshPro's margins (the text is laid out in the rect without them) and the line spacing
 ## of both kinds of text.
 func _text_margins(host: Control) -> void:
@@ -883,6 +913,11 @@ func _text_styles(host: Control) -> void:
 	eq(UiText.to_bbcode("<sprite index=1>", true, 0, 32.0, true, -1, "", with_sprites), "[img width=64 height=48 region=32,16,32,32]" + sheet_path + "[/img]", "by index=")
 	eq(UiText.to_bbcode("<sprite=\"Icons\" index=0>", true, 0, 32.0, true, -1, "", with_sprites), "[img width=32 height=32 region=0,32,32,32]" + sheet_path + "[/img]", "with the name of the asset before it")
 	eq(UiText.to_bbcode("<sprite=7>x", true, 0, 16.0, true, -1, "", with_sprites), "x", "a sprite the asset does not have draws nothing")
+	# an asset without face metrics (point size 0): as high as the font's ascent, times its scale
+	var bare_icons := Resource.new()
+	bare_icons.set_meta(&"unidot_tmp_sprites", {"point": 0.0, "scale": 0.0, "names": {}, "list": [{"rect": Rect2(0, 0, 32, 32), "width": 32.0, "height": 32.0, "scale": 1.5}]})
+	eq(UiText.to_bbcode("<sprite=0>", true, 0, 20.0, true, -1, "", {"sprites": bare_icons, "sprite_sheet": sheet}), "[img width=27 height=27 region=0,32,32,32]" + sheet_path + "[/img]", "a sprite of an asset without face metrics: the ascent of Liberation Sans (0.905 of 20) times 1.5")
+	eq(UiText.to_bbcode("<sprite=0>", true, 0, 20.0, true, -1, "", {"sprites": bare_icons, "sprite_sheet": sheet, "ascent": 1.0}), "[img width=30 height=30 region=0,32,32,32]" + sheet_path + "[/img]", "... the ascent of the text's font asset")
 	eq(UiText.to_bbcode("<sprite=0>x", true, 0, 16.0), "x", "nor does any sprite without an asset")
 	eq(UiText.visible_length("a<sprite=1>b", true, true), 3, "a sprite is one character")
 	eq(UiText.to_bbcode("a<sprite=0>bc", true, 0, 32.0, true, 2, "…", with_sprites), "a[img width=32 height=32 region=0,32,32,32]" + sheet_path + "[/img]…", "... for a cut as well")
@@ -1010,6 +1045,7 @@ func _text_nodes() -> void:
 	eq(UiText.visible_length("a<b>bc</b><br>d <unknown>", true, true), 15, "the characters a text shows: tags are not counted, a break is one, an unknown tag is text")
 	eq(UiText.to_bbcode("ab<br>cd", true, 0, 20.0, true, 3, "…"), "ab\n…", "a cut at a line's first character")
 	await _text_styles(host)
+	_sibling_order(host)
 	await _text_margins(host)
 	await _text_small(host)
 	# a hand-built Label has no Unity settings: the plain properties are used

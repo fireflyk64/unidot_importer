@@ -144,7 +144,11 @@ func _drawn(c: Control, fade: Color) -> Array:
 			return [0, Color.WHITE]   # (its text is drawn by a child: runtime/ui_text.gd)
 		var text_color: Color = c.get_theme_color("default_color" if c is RichTextLabel else "font_color") * c.self_modulate * fade
 		return [4 if text_color.a > 0.004 else 0, text_color]
-	elif c is LineEdit or c is OptionButton or c is Slider or c is ScrollBar:
+	elif c is LineEdit:
+		# (the widget draws the field's text, or its placeholder, itself: looked for as a text)
+		var shown_color: Color = c.get_theme_color("font_color" if not str(c.text).is_empty() else "font_placeholder_color") * c.self_modulate * fade
+		return [2, shown_color]
+	elif c is OptionButton or c is Slider or c is ScrollBar:
 		return [2, Color.WHITE]
 	else:
 		for st in ["normal", "panel"]:
@@ -474,21 +478,32 @@ func _bounds(c: Control, xf: Transform2D) -> Rect2:
 func _check_texts(vp: SubViewport, img: Image, canvas: String, items: Array, problems: Array) -> void:
 	for index in range(items.size()):
 		var item: Array = items[index]
-		if int(item[2]) != 4 or not (item[0] is RichTextLabel):
+		var field: LineEdit = item[0] as LineEdit
+		var rich: RichTextLabel = item[0] as RichTextLabel
+		if not ((int(item[2]) == 4 and rich != null) or (int(item[2]) == 2 and field != null)):
 			continue
 		texts_seen += 1
-		var label: RichTextLabel = item[0]
+		var label: Control = item[0]
 		var xf: Transform2D = item[1]
 		var colour: Color = item[3]
-		if colour.a < 0.996 or label.visible_characters == 0 or label.get_parsed_text().strip_edges().is_empty():
-			continue
-		if label.text.contains("[color") or label.text.contains("[img") or label.size.x < 1.0 or label.size.y < 1.0:
+		var shown_text: String = ""
+		var font_px: float = 0.0
+		if field != null:
+			# an input field: the widget draws its text (or its placeholder) itself
+			shown_text = str(field.text) if not str(field.text).is_empty() else str(field.placeholder_text)
+			font_px = float(field.get_theme_font_size("font_size"))
+		else:
+			shown_text = rich.get_parsed_text()
+			font_px = float(rich.get_theme_font_size("normal_font_size"))
+			if rich.visible_characters == 0 or rich.text.contains("[color") or rich.text.contains("[img"):
+				continue
+		if colour.a < 0.996 or shown_text.strip_edges().is_empty() or label.size.x < 1.0 or label.size.y < 1.0:
 			continue
 		var scale := Vector2(xf.basis_xform(Vector2(1.0, 0.0)).length(), xf.basis_xform(Vector2(0.0, 1.0)).length())
-		if float(label.get_theme_font_size("normal_font_size")) * scale.y < 10.0:
+		if font_px * scale.y < 10.0:
 			continue
 		# (a text that runs out of its rect is drawn by a child, which is looked at instead)
-		if float(label.get_content_height()) > label.size.y + 1.0 or float(label.get_content_width()) > label.size.x + 1.0:
+		if rich != null and (float(rich.get_content_height()) > rich.size.y + 1.0 or float(rich.get_content_width()) > rich.size.x + 1.0):
 			continue
 		var on_screen: Vector2 = label.size * scale
 		var step: float = maxf(1.0, sqrt(on_screen.x * on_screen.y / 3000.0))
@@ -543,4 +558,4 @@ func _check_texts(vp: SubViewport, img: Image, canvas: String, items: Array, pro
 			continue
 		texts_checked += 1
 		if hits < 3:
-			problems.append("%s :: %s: the text '%s' does not show in its rect (%d pixels looked at, colour %s)" % [canvas, str(vp.get_child(0).get_path_to(label)), label.get_parsed_text().substr(0, 24), looked, str(colour)])
+			problems.append("%s :: %s: the text '%s' does not show in its rect (%d pixels looked at, colour %s)" % [canvas, str(vp.get_child(0).get_path_to(label)), shown_text.substr(0, 24), looked, str(colour)])
