@@ -6377,10 +6377,23 @@ class UnidotLineRenderer:
 		if parameters is Dictionary:
 			info["width"] = float(parameters.get("widthMultiplier", 1.0))
 			info["alignment"] = int(parameters.get("alignment", 0))
+			info["corner_vertices"] = int(parameters.get("numCornerVertices", 0))
+			info["cap_vertices"] = int(parameters.get("numCapVertices", 0))
+			info["texture_mode"] = int(parameters.get("textureMode", 0))
+			var texture_scale = parameters.get("textureScale")
+			if texture_scale is Vector2:
+				info["texture_scale"] = texture_scale
+			elif texture_scale is Dictionary:
+				info["texture_scale"] = Vector2(float(texture_scale.get("x", 1.0)), float(texture_scale.get("y", 1.0)))
 			if parameters.get("widthCurve") is Dictionary:
 				info["width_curve"] = UnidotParticleSystem.curve_from(parameters["widthCurve"])
 			if parameters.get("colorGradient") is Dictionary:
 				info["gradient"] = UnidotParticleSystem.gradient_from(parameters["colorGradient"])
+		# the renderer's material: the ribbon takes its colour, texture and blending
+		var materials = uprops.get("m_Materials")
+		if materials is Array and not materials.is_empty():
+			var material_ref = materials[0]
+			info["material"] = meta.get_godot_resource(material_ref, true) as Material if material_ref is Array and material_ref.size() >= 2 and material_ref[1] != 0 else null
 		outdict["metadata/unidot_line"] = info
 		outdict["mesh"] = line_renderer_runtime.mesh(info)
 		# positions of the world are drawn where they are, whatever the object does
