@@ -768,8 +768,10 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 				ctl.max_value = 1.0
 				ctl.step = 0.0
 				ctl.page = 0.0
-				ctl.value = _to_float(keys.get("m_Value", 0.0))
 				ctl.set_meta("unidot_scrollbar", {"direction": _to_int(keys.get("m_Direction", 0)), "size": _to_float(keys.get("m_Size", 1.0))})
+				# (the steps before the value, which is one of them)
+				selectable_script.scrollbar_set_steps(ctl, _to_int(keys.get("m_NumberOfSteps", 0)))
+				ctl.value = _to_float(keys.get("m_Value", 0.0))
 			_selectable(ctl, keys, obj, state, {"m_HandleRect": "handle"})
 			_events(keys.get("m_OnValueChanged"), ctl, "value_changed", 1, state, obj)
 		"Slider":
@@ -832,6 +834,9 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 				"horizontal": _to_int(keys.get("m_Horizontal", 1)) != 0,
 				"vertical": _to_int(keys.get("m_Vertical", 1)) != 0,
 				"movement": _to_int(keys.get("m_MovementType", 1)),
+				"elasticity": _to_float(keys.get("m_Elasticity", 0.1)),
+				"inertia": _to_int(keys.get("m_Inertia", 1)) != 0,
+				"deceleration": _to_float(keys.get("m_DecelerationRate", 0.135)),
 				"sensitivity": _to_float(keys.get("m_ScrollSensitivity", 1.0)),
 				"visibility": [_to_int(keys.get("m_HorizontalScrollbarVisibility", 0)), _to_int(keys.get("m_VerticalScrollbarVisibility", 0))],
 				"spacing": [_to_float(keys.get("m_HorizontalScrollbarSpacing", 0.0)), _to_float(keys.get("m_VerticalScrollbarSpacing", 0.0))],
@@ -1283,8 +1288,8 @@ const _OVERRIDE_FIELDS := {
 	"RawImage": ["m_Texture", "m_UVRect", "m_Color"],
 	"Toggle": ["m_IsOn", "graphic", "toggleTransition", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
 	"Slider": ["m_Value", "m_MinValue", "m_MaxValue", "m_WholeNumbers", "m_Direction", "m_FillRect", "m_HandleRect", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
-	"Scrollbar": ["m_Value", "m_Size", "m_Direction", "m_HandleRect", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
-	"ScrollRect": ["m_Content", "m_Viewport", "m_Horizontal", "m_Vertical", "m_MovementType", "m_ScrollSensitivity", "m_HorizontalScrollbar", "m_VerticalScrollbar", "m_HorizontalScrollbarVisibility", "m_VerticalScrollbarVisibility", "m_HorizontalScrollbarSpacing", "m_VerticalScrollbarSpacing"],
+	"Scrollbar": ["m_Value", "m_Size", "m_Direction", "m_NumberOfSteps", "m_HandleRect", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"ScrollRect": ["m_Content", "m_Viewport", "m_Horizontal", "m_Vertical", "m_MovementType", "m_Elasticity", "m_Inertia", "m_DecelerationRate", "m_ScrollSensitivity", "m_HorizontalScrollbar", "m_VerticalScrollbar", "m_HorizontalScrollbarVisibility", "m_VerticalScrollbarVisibility", "m_HorizontalScrollbarSpacing", "m_VerticalScrollbarSpacing"],
 	"InputField": ["m_Text", "m_CharacterLimit", "m_TextComponent", "m_Placeholder", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
 	"TMP_InputField": ["m_Text", "m_CharacterLimit", "m_TextComponent", "m_Placeholder", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
 	"Dropdown": ["m_Value", "m_Options", "m_CaptionText", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
@@ -1389,13 +1394,14 @@ func _override_component(kind: String, ctl: Control, uprops: Dictionary, obj: Re
 			_override_selectable(kind, ctl, uprops)
 		"ScrollRect":
 			var scroll: Dictionary = (ctl.get_meta(scroll_rect_script.META) as Dictionary).duplicate(true) if ctl.has_meta(scroll_rect_script.META) else {}
-			for entry in [["m_Horizontal", "horizontal"], ["m_Vertical", "vertical"]]:
+			for entry in [["m_Horizontal", "horizontal"], ["m_Vertical", "vertical"], ["m_Inertia", "inertia"]]:
 				if uprops.has(entry[0]):
 					scroll[entry[1]] = _to_int(uprops[entry[0]]) != 0
 			if uprops.has("m_MovementType"):
 				scroll["movement"] = _to_int(uprops["m_MovementType"])
-			if uprops.has("m_ScrollSensitivity"):
-				scroll["sensitivity"] = _to_float(uprops["m_ScrollSensitivity"])
+			for entry in [["m_ScrollSensitivity", "sensitivity"], ["m_Elasticity", "elasticity"], ["m_DecelerationRate", "deceleration"]]:
+				if uprops.has(entry[0]):
+					scroll[entry[1]] = _to_float(uprops[entry[0]])
 			var vis: Array = (scroll.get("visibility", [0, 0]) as Array).duplicate()
 			var gap: Array = (scroll.get("spacing", [0.0, 0.0]) as Array).duplicate()
 			for entry in [["m_HorizontalScrollbarVisibility", 0], ["m_VerticalScrollbarVisibility", 1]]:
@@ -1604,6 +1610,9 @@ func _override_selectable(kind: String, ctl: Control, uprops: Dictionary) -> voi
 					if uprops.has("m_Direction"):
 						sbar["direction"] = _to_int(uprops["m_Direction"])
 					ctl.set_meta("unidot_scrollbar", sbar)
+				if kind == "Scrollbar" and uprops.has("m_NumberOfSteps"):
+					selectable_script.scrollbar_set_steps(ctl, _to_int(uprops["m_NumberOfSteps"]))
+					ctl.value = ctl.value
 				if kind == "Slider":
 					if uprops.has("m_MinValue"):
 						ctl.min_value = _to_float(uprops["m_MinValue"])

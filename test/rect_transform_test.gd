@@ -1057,6 +1057,123 @@ func _scroll_rect() -> void:
 	ok(not (expand[3] as Control).visible, "... and the bar hidden")
 	parent.queue_free()
 	await process_frame
+	await _scroll_movement()
+
+
+func _scroll_config(host: Node, changes: Dictionary) -> void:
+	var cfg: Dictionary = (host.get_meta(Scroll.META) as Dictionary).duplicate(true)
+	cfg.merge(changes, true)
+	host.set_meta(Scroll.META, cfg)
+
+
+## ScrollRect.LateUpdate's movement: inertia, the elastic spring, the rubber band of a drag,
+## a Scrollbar with steps. Numbers from Unity's formulas (Mathf.SmoothDamp, RubberDelta).
+func _scroll_movement() -> void:
+	var parent := Control.new()
+	parent.size = Vector2(600, 600)
+	root.add_child(parent)
+	var damp: Array = Scroll.smooth_damp(0.0, 100.0, 0.0, 0.1, 0.02)
+	near(damp[0], 6.1562, "Mathf.SmoothDamp(0 → 100, smooth time 0.1, 0.02 s): the position")
+	near(damp[1], 536.25, "... and the speed", 0.05)
+	near(Scroll.rubber(100.0, 200.0), 43.1373, "RubberDelta: 100 beyond a view of 200")
+	near(Scroll.rubber(-100.0, 200.0), -43.1373, "... to the other side")
+	# inertia (clamped movement): the velocity decays by decelerationRate ^ time
+	var s: Array = _scroll_view(parent, 500.0, 0)
+	_scroll_config(s[0], {"inertia": true, "deceleration": 0.135, "elasticity": 0.1})
+	await process_frame
+	Scroll.update(s[0])
+	var v: Vector2 = Scroll.move(s[0], Vector2(0, 100), 0.1)
+	near(v, Vector2(0, 81.853), "inertia: after 0.1 s the velocity is 100 * 0.135 ^ 0.1")
+	near(RT.anchored_position(s[2]), Vector2(0, 8.1853), "... and the content has moved by it")
+	for _i in range(400):
+		v = Scroll.move(s[0], v, 0.02)
+	var rest: float = RT.anchored_position(s[2]).y
+	ok(v == Vector2.ZERO and rest > 44.0 and rest < 50.0, "the content coasts to rest (about 100 / -ln 0.135 = 49.9): %s at %s" % [str(v), str(rest)])
+	v = Scroll.move(s[0], Vector2(0, -2000), 0.1)
+	near(RT.anchored_position(s[2]), Vector2(0, 0), "clamped: a velocity into the edge stops at the edge")
+	_scroll_config(s[0], {"inertia": false})
+	v = Scroll.move(s[0], Vector2(0, 100), 0.1)
+	ok(v == Vector2.ZERO and RT.anchored_position(s[2]).is_equal_approx(Vector2.ZERO), "without inertia there is no velocity: " + str(v))
+	# elastic: content outside the view springs back
+	_scroll_config(s[0], {"movement": 1, "inertia": true})
+	RT.set_anchored_position(s[2], Vector2(0, -50))
+	Scroll.update(s[0], true)
+	near(float(s[3].get_meta(&"unidot_scrollbar")["size"]), 0.3, "over-stretched by 50: the handle shrinks ((200 - 50) / 500)")
+	v = Scroll.move(s[0], Vector2.ZERO, 0.02)
+	near(RT.anchored_position(s[2]), Vector2(0, -46.9219), "the spring's first step (SmoothDamp towards the edge)")
+	near(v, Vector2(0, 268.125), "... and its speed", 0.05)
+	RT.set_anchored_position(s[2], Vector2(0, -50))
+	Scroll.move(s[0], Vector2.ZERO, 0.02, true)
+	near(RT.anchored_position(s[2]), Vector2(0, -49.6023), "while the wheel scrolls the spring is three times slower")
+	v = Vector2.ZERO
+	for _i in range(150):
+		v = Scroll.move(s[0], v, 0.02)
+	ok(v == Vector2.ZERO and absf(RT.anchored_position(s[2]).y) < 0.01, "after three seconds the content is back at the edge: %s at %s" % [str(v), str(RT.anchored_position(s[2]))])
+	# a drag beyond the edge is a rubber band
+	Scroll.drag_to(s[0], Vector2(0, -100))
+	near(RT.anchored_position(s[2]), Vector2(0, -43.1373), "dragged 100 beyond the top: the content follows by RubberDelta")
+	Scroll.drag_to(s[0], Vector2(0, 120))
+	near(RT.anchored_position(s[2]), Vector2(0, 120), "inside the range the content follows the pointer")
+	Scroll.scroll_by(s[0], Vector2(0, -150), true)
+	near(RT.anchored_position(s[2]), Vector2(0, -30), "the wheel may overshoot an elastic rect (the spring brings it back)")
+	_scroll_config(s[0], {"movement": 2})
+	Scroll.drag_to(s[0], Vector2(0, -100))
+	near(RT.anchored_position(s[2]), Vector2(0, 0), "clamped: a drag stops at the edge")
+	Scroll.scroll_by(s[0], Vector2(0, -150), true)
+	near(RT.anchored_position(s[2]), Vector2(0, 0), "... and so does the wheel")
+	_scroll_config(s[0], {"movement": 0})
+	Scroll.drag_to(s[0], Vector2(0, -100))
+	near(RT.anchored_position(s[2]), Vector2(0, -100), "unrestricted: the content goes where it is dragged")
+	# the helper node: velocity from a drag, coasting after the release
+	_scroll_config(s[0], {"movement": 2})
+	RT.set_anchored_position(s[2], Vector2.ZERO)
+	var helper := Node.new()
+	helper.name = Scroll.HELPER
+	helper.set_script(Scroll)
+	s[0].add_child(helper)
+	helper.set_process(false)   # (stepped by hand, with known times)
+	helper._process(0.1)
+	var press := InputEventMouseButton.new()
+	press.button_index = MOUSE_BUTTON_LEFT
+	press.pressed = true
+	press.position = Vector2(100, 100)
+	helper._on_input(press)
+	var motion := InputEventMouseMotion.new()
+	motion.position = Vector2(100, 80)
+	motion.button_mask = MOUSE_BUTTON_MASK_LEFT
+	helper._on_input(motion)
+	near(RT.anchored_position(s[2]), Vector2(0, 20), "a drag 20 up moves the content 20 up")
+	helper._process(0.1)
+	near(helper.velocity, Vector2(0, 200), "the drag's velocity (20 in 0.1 s)")
+	var release := InputEventMouseButton.new()
+	release.button_index = MOUSE_BUTTON_LEFT
+	release.pressed = false
+	release.position = Vector2(100, 80)
+	helper._on_input(release)
+	helper._process(0.1)
+	near(helper.velocity, Vector2(0, 163.706), "after the release the content coasts: the velocity decays", 0.01)
+	near(RT.anchored_position(s[2]), Vector2(0, 36.3706), "... and moves the content")
+	helper._on_input(press)
+	ok(helper.velocity == Vector2.ZERO, "a press stops the movement")
+	helper._on_input(release)
+	helper.velocity = Vector2(0, 50)
+	helper.stop_movement()
+	ok(helper.velocity == Vector2.ZERO, "StopMovement")
+	# a Scrollbar with steps: its value is one of them, and the content follows the bar
+	var stepped: Array = _scroll_view(parent, 500.0, 0)
+	var sb: Dictionary = (stepped[3].get_meta(&"unidot_scrollbar") as Dictionary).duplicate()
+	sb["steps"] = 5
+	stepped[3].set_meta(&"unidot_scrollbar", sb)
+	(stepped[3] as Range).step = 0.25
+	await process_frame
+	Scroll.set_normalized(stepped[0], 0.4, 1)
+	near(RT.anchored_position(stepped[2]), Vector2(0, 180), "normalized 0.4 of 300 hidden")
+	Scroll.update(stepped[0])
+	near((stepped[3] as Range).value, 0.5, "numberOfSteps 5: the bar's value is the nearest step")
+	near(RT.anchored_position(stepped[2]), Vector2(0, 150), "... and the content is put there (the bar's onValueChanged)")
+	near(RT.anchor_min(stepped[4]), Vector2(0, 0.3), "... with the handle (0.5 * (1 - 0.4))")
+	parent.queue_free()
+	await process_frame
 
 
 func _in_quads(quads: Array, p: Vector2) -> bool:

@@ -198,6 +198,19 @@ static func _slider_visuals(host: Range, cfg: Dictionary) -> void:
 
 
 ## Scrollbar.UpdateVisuals: the handle covers `size` of its container, moved by the value.
+## Scrollbar.numberOfSteps: with more than one step the bar's value is one of them (the steps
+## divide 0..1 evenly, which is what Range.step does).
+static func scrollbar_set_steps(bar: Range, steps: int) -> void:
+	var sb: Dictionary = (bar.get_meta(&"unidot_scrollbar") as Dictionary).duplicate() if bar.has_meta(&"unidot_scrollbar") else {}
+	sb["steps"] = steps
+	bar.set_meta(&"unidot_scrollbar", sb)
+	bar.step = 1.0 / float(steps - 1) if steps > 1 else 0.0
+
+
+static func scrollbar_steps(bar: Range) -> int:
+	return int((bar.get_meta(&"unidot_scrollbar") as Dictionary).get("steps", 0)) if bar.has_meta(&"unidot_scrollbar") else 0
+
+
 static func scrollbar_visuals(host: Range) -> void:
 	var handle: Control = part(host, "handle") as Control
 	if handle == null or not (RT.logical_parent(handle) is Control):

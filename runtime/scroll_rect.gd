@@ -9,19 +9,25 @@ extends Node
 ##
 ## The parent's `unidot_scroll` metadata holds the component:
 ##   {content, viewport, hbar, vbar: NodePath, horizontal, vertical: bool,
-##    movement (0 unrestricted, 1 elastic, 2 clamped), sensitivity,
+##    movement (0 unrestricted, 1 elastic, 2 clamped), elasticity, inertia: bool,
+##    deceleration (decelerationRate), sensitivity,
 ##    visibility: [horizontal, vertical] (0 permanent, 1 auto hide, 2 auto hide and expand the
 ##    viewport), spacing: [horizontal, vertical], enabled: bool}
 ## What happens every frame is ScrollRect.LateUpdate with its layout pass:
 ##   * a viewport that makes room for auto-hiding scrollbars is sized (SetLayoutHorizontal /
 ##     UpdateScrollbarLayout);
-##   * content that lies outside the view is brought back (elastic movement snaps, it does not
-##     spring);
+##   * the content moves on by its velocity, which decays (inertia); content that lies outside
+##     the view is brought back: at once when the movement is clamped, by a spring when it is
+##     elastic (`move`). The first frame finds the content at rest: what the scene shows at
+##     its start is what `update` leaves, the static form of all this;
 ##   * the scrollbars get size (view / content) and value (the normalized position) and are
-##     shown or hidden; their handles follow (Selectable.scrollbar_visuals);
+##     shown or hidden; their handles follow (Selectable.scrollbar_visuals). A Scrollbar with
+##     steps takes the nearest step and the content is put there (Scrollbar.Set raises its
+##     onValueChanged, to which the ScrollRect listens);
 ##   * `scrolled(normalized: Vector2)` of this node is raised when the position changed
 ##     (ScrollRect.onValueChanged; (0, 0) is the lower left corner).
-## The pointer scrolls with the wheel and by dragging the view.
+## The pointer scrolls with the wheel and by dragging the view; a drag leaves its velocity
+## behind (`velocity`, in units of the content's anchored position per second, y up).
 
 const RT := preload("./rect_transform.gd")
 const Selectable := preload("./selectable.gd")
@@ -30,7 +36,12 @@ const HELPER := "UnidotScroll"
 
 signal scrolled(normalized: Vector2)
 
+## ScrollRect.velocity
+var velocity: Vector2 = Vector2.ZERO
+
 var _host: Control = null
+var _scrolling: bool = false     # the wheel moved the content since the last frame
+var _last_position: Vector2 = Vector2.ZERO
 var _dragging: bool = false
 var _drag_from: Vector2 = Vector2.ZERO
 var _drag_content: Vector2 = Vector2.ZERO
@@ -185,8 +196,9 @@ static func offset(host: Node, b: Array = []) -> Vector2:
 
 
 ## Move the content by `delta` (view units, y up), kept inside the view unless the movement is
-## unrestricted.
-static func scroll_by(host: Node, delta: Vector2) -> void:
+## unrestricted. `wheel`: as ScrollRect.OnScroll does it, which lets an elastic rect overshoot
+## (the spring brings the content back).
+static func scroll_by(host: Node, delta: Vector2, wheel: bool = false) -> void:
 	var content: Control = content_of(host)
 	if content == null:
 		return
@@ -195,13 +207,110 @@ static func scroll_by(host: Node, delta: Vector2) -> void:
 		delta.x = 0.0
 	if not bool(cfg.get("vertical", true)):
 		delta.y = 0.0
-	var b: Array = bounds(host)
-	b[2] += delta
-	b[3] += delta
-	delta += offset(host, b)
+	if not (wheel and int(cfg.get("movement", 1)) == 1):
+		var b: Array = bounds(host)
+		b[2] += delta
+		b[3] += delta
+		delta += offset(host, b)
 	if delta.is_zero_approx():
 		return
 	RT.set_anchored_position(content, RT.anchored_position(content) + Vector2(_content_units(host, delta.x, 0), _content_units(host, delta.y, 1)))
+
+
+## Mathf.SmoothDamp without a speed limit → [position, speed].
+static func smooth_damp(current: float, target: float, speed: float, smooth_time: float, delta: float) -> Array:
+	smooth_time = maxf(0.0001, smooth_time)
+	var omega: float = 2.0 / smooth_time
+	var x: float = omega * delta
+	var decay: float = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x)
+	var change: float = current - target
+	var temp: float = (speed + omega * change) * delta
+	speed = (speed - omega * temp) * decay
+	var output: float = target + (change + temp) * decay
+	if (target - current > 0.0) == (output > target):
+		# (past the target: stop there)
+		output = target
+		speed = 0.0
+	return [output, speed]
+
+
+## ScrollRect.RubberDelta: how far content dragged `over` beyond the view's edge still is from
+## where the pointer would have it.
+static func rubber(over: float, view_size: float) -> float:
+	if view_size <= 0.0:
+		return 0.0
+	return (1.0 - (1.0 / ((absf(over) * 0.55 / view_size) + 1.0))) * view_size * signf(over)
+
+
+## ScrollRect.OnDrag: the content at the anchored position `want`, the pointer's. Beyond the
+## view's edge a clamped rect stops and an elastic one stretches like a rubber band.
+static func drag_to(host: Node, want: Vector2) -> void:
+	var content: Control = content_of(host)
+	if content == null:
+		return
+	var cfg: Dictionary = config(host)
+	var now: Vector2 = RT.anchored_position(content)
+	if not bool(cfg.get("horizontal", true)):
+		want.x = now.x
+	if not bool(cfg.get("vertical", true)):
+		want.y = now.y
+	var units := Vector2(_content_units(host, 1.0, 0), _content_units(host, 1.0, 1))   # content units per view unit
+	var b: Array = bounds(host)
+	var shift: Vector2 = (want - now) / units
+	b[2] += shift
+	b[3] += shift
+	var off: Vector2 = offset(host, b)
+	want += off * units
+	if int(cfg.get("movement", 1)) == 1:
+		for axis in range(2):
+			if off[axis] != 0.0:
+				want[axis] -= rubber(off[axis], b[1][axis] - b[0][axis]) * units[axis]
+	if not want.is_equal_approx(now):
+		RT.set_anchored_position(content, want)
+
+
+## The movement of ScrollRect.LateUpdate while nothing drags: `velocity` (units of the
+## content's anchored position per second) decays and moves the content; content outside the
+## view springs back (elastic) or is put back (clamped). → the velocity after `delta` seconds.
+## `scrolling`: the wheel moved the content this frame (the spring is three times slower).
+static func move(host: Node, velocity: Vector2, delta: float, scrolling: bool = false) -> Vector2:
+	var content: Control = content_of(host)
+	if content == null:
+		return Vector2.ZERO
+	var cfg: Dictionary = config(host)
+	var movement: int = int(cfg.get("movement", 1))
+	var off: Vector2 = offset(host)
+	if off == Vector2.ZERO and velocity == Vector2.ZERO:
+		return velocity
+	var units := Vector2(_content_units(host, 1.0, 0), _content_units(host, 1.0, 1))
+	var start: Vector2 = RT.anchored_position(content)
+	var pos: Vector2 = start
+	for axis in range(2):
+		if movement == 1 and off[axis] != 0.0:
+			var smooth: float = float(cfg.get("elasticity", 0.1)) * (3.0 if scrolling else 1.0)
+			var damped: Array = smooth_damp(pos[axis], pos[axis] + off[axis] * units[axis], velocity[axis], smooth, delta)
+			pos[axis] = damped[0]
+			velocity[axis] = 0.0 if absf(damped[1]) < 1.0 else float(damped[1])
+		elif bool(cfg.get("inertia", true)):
+			velocity[axis] *= pow(float(cfg.get("deceleration", 0.135)), delta)
+			if absf(velocity[axis]) < 1.0:
+				velocity[axis] = 0.0
+			pos[axis] += velocity[axis] * delta
+		else:
+			velocity[axis] = 0.0
+	if not bool(cfg.get("horizontal", true)):
+		pos.x = start.x
+	if not bool(cfg.get("vertical", true)):
+		pos.y = start.y
+	if movement == 2:
+		var b: Array = bounds(host)
+		var shift: Vector2 = (pos - start) / units
+		b[2] += shift
+		b[3] += shift
+		pos += offset(host, b) * units
+	if pos != start:
+		RT.set_anchored_position(content, pos)
+	return velocity
 
 
 ## Is the content larger than the view on an axis (ScrollRect.hScrollingNeeded / vScrollingNeeded)?
@@ -266,18 +375,46 @@ static func _drive(c: Control, want: Dictionary) -> void:
 
 ## ScrollRect.LateUpdate without the pointer: layout, content brought back into the view,
 ## scrollbars. → [view min, view max, content min, content max, content position] after it.
+## `dragging`: content outside the view is left where the pointer (or the spring) has it.
 static func update(host: Node, dragging: bool = false) -> Array:
 	var content: Control = content_of(host)
 	if content == null:
 		return []
-	var cfg: Dictionary = config(host)
 	layout(host)
-	var b: Array = bounds(host)
 	if not dragging:
-		var off: Vector2 = offset(host, b)
+		var off: Vector2 = offset(host)
 		if not off.is_zero_approx():
 			RT.set_anchored_position(content, RT.anchored_position(content) + Vector2(_content_units(host, off.x, 0), _content_units(host, off.y, 1)))
-			b = bounds(host)
+	return bars(host)
+
+
+## A linked Scrollbar with steps (Scrollbar.numberOfSteps) only takes those values, and what it
+## takes it hands back (its onValueChanged sets the normalized position): the content lies on
+## a step. → the axes on which the content was moved.
+static func snap_to_steps(host: Node) -> Array:
+	var snapped: Array = [false, false]
+	for axis in range(2):
+		var bar: Range = part(host, "hbar" if axis == 0 else "vbar") as Range
+		var steps: int = int((bar.get_meta(&"unidot_scrollbar") as Dictionary).get("steps", 0)) if bar != null and bar.has_meta(&"unidot_scrollbar") else 0
+		if steps < 2 or not scrolling_needed(host, axis):
+			continue
+		var at: float = normalized(host)[axis]
+		var step: float = roundf(at * float(steps - 1)) / float(steps - 1)
+		if absf(step - at) > 1e-4:
+			var before: Vector2 = RT.anchored_position(content_of(host))
+			set_normalized(host, step, axis)
+			snapped[axis] = not RT.anchored_position(content_of(host)).is_equal_approx(before)
+	return snapped
+
+
+## ScrollRect.UpdateScrollbars and UpdateScrollbarVisibility → [view min, view max, content min,
+## content max, content position].
+static func bars(host: Node) -> Array:
+	var content: Control = content_of(host)
+	var cfg: Dictionary = config(host)
+	snap_to_steps(host)
+	var b: Array = bounds(host)
+	var off: Vector2 = offset(host, b)
 	var visibility: Array = cfg.get("visibility", [0, 0])
 	var norm: Vector2 = normalized(host)
 	for axis in range(2):
@@ -286,7 +423,8 @@ static func update(host: Node, dragging: bool = false) -> Array:
 			continue
 		var csize: float = b[3][axis] - b[2][axis]
 		var vsize: float = b[1][axis] - b[0][axis]
-		var size: float = clampf(vsize / csize, 0.0, 1.0) if csize > 0.0 else 1.0
+		# (content stretched beyond the view's edge shrinks the handle)
+		var size: float = clampf((vsize - absf(off[axis])) / csize, 0.0, 1.0) if csize > 0.0 else 1.0
 		var sb: Dictionary = bar.get_meta(&"unidot_scrollbar") if bar.has_meta(&"unidot_scrollbar") else {}
 		if not is_equal_approx(float(sb.get("size", -1.0)), size):
 			sb = sb.duplicate()
@@ -303,12 +441,34 @@ static func update(host: Node, dragging: bool = false) -> Array:
 	return [b[0], b[1], b[2], b[3], RT.anchored_position(content)]
 
 
-func _process(_delta: float) -> void:
+## ScrollRect.StopMovement
+func stop_movement() -> void:
+	velocity = Vector2.ZERO
+
+
+func _process(delta: float) -> void:
 	if _host == null or not _host.is_visible_in_tree() or not bool(config(_host).get("enabled", true)):
 		return
-	var state: Array = update(_host, _dragging)
-	if state.is_empty():
+	var content: Control = content_of(_host)
+	if content == null:
 		return
+	var state: Array
+	if _prev.is_empty():
+		# the first frame: the content at rest
+		state = update(_host)
+	else:
+		layout(_host)
+		if not _dragging:
+			velocity = move(_host, velocity, delta, _scrolling)
+		elif bool(config(_host).get("inertia", true)) and delta > 0.0:
+			velocity = velocity.lerp((RT.anchored_position(content) - _last_position) / delta, minf(delta * 10.0, 1.0))
+		var snapped: Array = snap_to_steps(_host)
+		for axis in range(2):
+			if snapped[axis]:
+				velocity[axis] = 0.0
+		state = bars(_host)
+	_scrolling = false
+	_last_position = RT.anchored_position(content)
 	if _prev.is_empty():
 		_prev = state
 		return
@@ -342,8 +502,11 @@ func _on_input(event: InputEvent) -> void:
 			MOUSE_BUTTON_LEFT:
 				_dragging = event.pressed and content_of(_host) != null
 				if _dragging:
+					# (OnInitializePotentialDrag: a press stops what was moving)
+					velocity = Vector2.ZERO
 					_drag_from = event.position
 					_drag_content = RT.anchored_position(content_of(_host))
+					_last_position = _drag_content
 				return
 		if notch != Vector2.ZERO and event.pressed:
 			# ScrollRect.OnScroll: the wheel moves the content against its direction; a wheel
@@ -359,19 +522,17 @@ func _on_input(event: InputEvent) -> void:
 				if absf(delta.y) > absf(delta.x):
 					delta.x = delta.y
 				delta.y = 0.0
-			scroll_by(_host, delta * float(cfg.get("sensitivity", 1.0)))
+			scroll_by(_host, delta * float(cfg.get("sensitivity", 1.0)), true)
+			_scrolling = true
 			_host.accept_event()
 	elif event is InputEventMouseMotion and _dragging:
 		if (event.button_mask & MOUSE_BUTTON_MASK_LEFT) == 0:
 			_dragging = false
 			return
-		var content: Control = content_of(_host)
 		var view: Control = view_of(_host)
 		# the pointer's way in the host, in view units (y up)
 		var moved: Vector2 = event.position - _drag_from
 		var to_view: Transform2D = _to_view(_host, view) if view != _host else Transform2D.IDENTITY
 		var sx: float = to_view.x.length()
 		var sy: float = to_view.y.length()
-		var want: Vector2 = _drag_content + Vector2(_content_units(_host, moved.x / (sx if sx > 1e-9 else 1.0), 0), _content_units(_host, -moved.y / (sy if sy > 1e-9 else 1.0), 1))
-		var now: Vector2 = RT.anchored_position(content)
-		scroll_by(_host, Vector2((want.x - now.x), (want.y - now.y)))
+		drag_to(_host, _drag_content + Vector2(_content_units(_host, moved.x / (sx if sx > 1e-9 else 1.0), 0), _content_units(_host, -moved.y / (sy if sy > 1e-9 else 1.0), 1)))
