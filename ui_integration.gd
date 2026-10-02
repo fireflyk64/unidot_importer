@@ -26,6 +26,7 @@ const scroll_rect_script := preload("./runtime/scroll_rect.gd")
 const dropdown_script := preload("./runtime/dropdown.gd")
 const selectable_script := preload("./runtime/selectable.gd")
 const text_fit_script := preload("./runtime/ui_text_fit.gd")
+const frame_script := preload("./runtime/ui_frame.gd")
 const sprite_script := preload("./runtime/ui_sprite.gd")
 const Graphic := preload("./runtime/ui_graphic.gd")
 const UiText := preload("./runtime/ui_text.gd")
@@ -312,10 +313,46 @@ func initialize_skelleys(_state: RefCounted, _objs: Array, _is_prefab: bool):
 	pass
 
 
-func setup_post_children(_game_object: RefCounted, _state: RefCounted, node: Node, _avatar_meta: RefCounted):
+func setup_post_children(_game_object: RefCounted, state: RefCounted, node: Node, _avatar_meta: RefCounted):
 	# the canvas's controls exist now: size its viewport and plane to what it draws
 	if node != null and RT.is_island(node):
 		RT.fit_island(node)
+	if node is Control:
+		_frame_components(node, state)
+
+
+## Components of a UI object that live in space (a sound, a collider, a mesh: Node3Ds the
+## importer hung under the Control) go into the object's 3D frame, where the rect is in the
+## world. What was known by its place in the scene is known by the new one.
+func _frame_components(ctl: Control, state: RefCounted) -> void:
+	var movers: Array = []
+	for c in ctl.get_children():
+		if c is Node3D and not c.has_meta(RT.META_HELPER) and not c.has_meta(RT.META_CANVAS):
+			movers.append(c)
+	if movers.is_empty() or state.scene_contents == null:
+		return
+	var frame: Node3D = RT.frame_of(ctl, true, frame_script, state.owner)
+	for c in movers:
+		var before: String = str(state.scene_contents.get_path_to(c))
+		var owners: Array = []
+		_owners_below(c, owners)
+		ctl.remove_child(c)
+		frame.add_child(c)
+		for pair in owners:
+			(pair[0] as Node).owner = pair[1]
+		var after: String = str(state.scene_contents.get_path_to(c))
+		for id in state.meta.fileid_to_nodepath:
+			var known: String = str(state.meta.fileid_to_nodepath[id])
+			if known == before or known.begins_with(before + "/"):
+				state.meta.fileid_to_nodepath[id] = NodePath(after + known.substr(before.length()))
+	stats["spatial"] = int(stats.get("spatial", 0)) + movers.size()
+
+
+## (taking a node out of the tree loses the owners below it)
+func _owners_below(n: Node, out: Array) -> void:
+	out.append([n, n.owner])
+	for c in n.get_children():
+		_owners_below(c, out)
 
 
 func setup_post_prefab(_prefab_object: RefCounted, _state: RefCounted, _instanced_scene: Node):
@@ -523,9 +560,18 @@ static func rect_override_properties(node: Node, uprops: Dictionary) -> Dictiona
 const META_PLAIN := RT.META_PLAIN
 
 
-## Is there a RectTransform somewhere below this Transform (in its own file)?
+var _instances_below: Dictionary = {}   # meta → {transform file id: [guid of an instanced prefab]}
+var _prefab_has_ui: Dictionary = {}     # guid of a prefab → does it hold a RectTransform
+
+## Is there a RectTransform somewhere below this Transform: in its own file, or in a prefab
+## that is instanced below it?
 func _holds_ui(transform: RefCounted, depth: int = 0) -> bool:
-	if depth > 32 or not (transform.keys.get("m_Children") is Array):
+	if depth > 32:
+		return false
+	for guid in _instanced_below(transform):
+		if _prefab_holds_ui(str(guid), transform.meta):
+			return true
+	if not (transform.keys.get("m_Children") is Array):
 		return false
 	for ref in transform.keys["m_Children"]:
 		var child = transform.meta.lookup(ref, true)
@@ -534,6 +580,42 @@ func _holds_ui(transform: RefCounted, depth: int = 0) -> bool:
 		if child.type == "RectTransform" or _holds_ui(child, depth + 1):
 			return true
 	return false
+
+
+## The prefabs instanced directly below a Transform of a file (PrefabInstance.m_TransformParent).
+func _instanced_below(transform: RefCounted) -> Array:
+	var meta: Resource = transform.meta
+	if not _instances_below.has(meta):
+		var found: Dictionary = {}
+		for id in meta.parsed.assets if meta.parsed != null else {}:
+			var obj = meta.parsed.assets[id]
+			if obj == null or obj.type != "PrefabInstance":
+				continue
+			var parent = (obj.keys["m_Modification"] as Dictionary).get("m_TransformParent") if obj.keys.get("m_Modification") is Dictionary else null
+			var source = obj.keys.get("m_SourcePrefab", obj.keys.get("m_ParentPrefab"))
+			if parent is Array and parent.size() >= 2 and parent[1] != 0 and source is Array and source.size() >= 3 and typeof(source[2]) == TYPE_STRING:
+				if not found.has(parent[1]):
+					found[parent[1]] = []
+				found[parent[1]].append(source[2])
+		_instances_below[meta] = found
+	return (_instances_below[meta] as Dictionary).get(transform.fileID, [])
+
+
+## Does a prefab (imported before what instances it) hold a RectTransform, itself or through
+## the prefabs it instances?
+func _prefab_holds_ui(guid: String, from: Resource, depth: int = 0) -> bool:
+	if not _prefab_has_ui.has(guid):
+		_prefab_has_ui[guid] = false   # (and no way round in circles)
+		var prefab: Resource = from.lookup_meta_by_guid(guid)
+		var has: bool = false
+		if prefab != null and depth < 16:
+			for types in [prefab.fileid_to_utype, prefab.prefab_fileid_to_utype]:
+				for id in types:
+					if int(types[id]) == 224:
+						has = true
+						break
+		_prefab_has_ui[guid] = has
+	return _prefab_has_ui[guid]
 
 
 ## The rect of a plain Transform below a Control: no size, at its local position from the
@@ -564,8 +646,18 @@ func create_gameobject_node(go: RefCounted, state: RefCounted, new_parent: Node)
 		return null
 	if transform.type != "RectTransform":
 		var host: Node = RT.child_host(new_parent)
-		if transform.type != "Transform" or not (host is Control) or not _holds_ui(transform):
+		if transform.type != "Transform" or not (host is Control):
 			return null
+		if not _holds_ui(transform):
+			if not (new_parent is Control):
+				return null   # below the canvas object itself: a Node3D of its holder
+			# no UI on it or below it, under a UI object: a 3D object in that object's frame
+			var spatial := Node3D.new()
+			transform.configure_node(spatial)
+			spatial.name = go.name
+			state.add_child(spatial, RT.frame_of(new_parent, true, frame_script, state.owner), transform)
+			stats["spatial"] = int(stats.get("spatial", 0)) + 1
+			return spatial
 		var plain := Control.new()
 		plain.name = go.name
 		plain.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -899,6 +991,7 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 				ctl.editable = _to_int(keys.get("m_Interactable", 1)) != 0
 				ctl.add_theme_font_size_override("font_size", _input_font_size(ctl, keys, obj))
 				UiText.set_fonts(ctl)
+				_fit_input_line(ctl)
 				# the Unity objects that draw the text and the placeholder (built later)
 				ctl.set_meta(&"unidot_input", {})
 				for pair in [["m_TextComponent", "text"], ["m_Placeholder", "placeholder"]]:
@@ -1069,6 +1162,26 @@ func _input_font_size(ctl: Control, keys: Dictionary, obj: RefCounted) -> int:
 	if h > 0.0:
 		size = minf(size, floorf(h / 1.45))
 	return maxi(int(size), 1)
+
+
+## A LineEdit is at least as high as a line of its font, and a font has no size below one
+## unit: a field lower than that (a canvas whose units are metres) gets a variation of its font
+## whose lines are that much lower. What is drawn of the text is cut at the field, as in Unity.
+func _fit_input_line(ctl: LineEdit) -> void:
+	var font: Font = ctl.get_theme_font("font")
+	var height: float = RT.rect_size(ctl).y
+	if font == null or height <= 0.0:
+		return
+	var line: float = font.get_height(ctl.get_theme_font_size("font_size"))
+	if line <= height:
+		return
+	var low := FontVariation.new()
+	low.base_font = font
+	var cut: int = int(ceil((line - height) * 0.5))
+	low.spacing_top = -cut
+	low.spacing_bottom = -cut
+	ctl.add_theme_font_override("font", low)
+	ctl.clip_contents = true
 
 
 ## Unity's built-in UI sprites (the default look of buttons, toggles, sliders ...): no package

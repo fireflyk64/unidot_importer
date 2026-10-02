@@ -14,6 +14,7 @@ const Selectable := preload("../runtime/selectable.gd")
 const TextFit := preload("../runtime/ui_text_fit.gd")
 const Sprite := preload("../runtime/ui_sprite.gd")
 const Scroll := preload("../runtime/scroll_rect.gd")
+const Frame := preload("../runtime/ui_frame.gd")
 const UiGroup := preload("../runtime/canvas_group.gd")
 
 var _checks: int = 0
@@ -55,6 +56,7 @@ func _init() -> void:
 	await _screen_canvas()
 	await _plain_holders()
 	await _negative_sizes()
+	await _frames_3d()
 	_rich_text()
 	await _text_nodes()
 	_graphics()
@@ -233,7 +235,6 @@ func _canvas(pos: Vector3 = Vector3(1, 2, 3), scale: float = 0.01) -> Node3D:
 	return holder
 
 
-## Unity's defaults (centre anchors, centre pivot) plus the given values.
 ## A rect stretched with insets larger than its parent has a negative size. Unity lays its
 ## children out against it all the same; a Control cannot be smaller than nothing, so what is
 ## below is placed by the size the rect should have.
@@ -281,6 +282,46 @@ func _negative_sizes() -> void:
 	await process_frame
 
 
+## What is not UI on or below a UI object (a sound on a button, a collider, an object without a
+## RectTransform) hangs in the object's 3D frame: a Node3D child of the Control that stays where
+## Unity has the rect. Its children are children of the UI object.
+func _frames_3d() -> void:
+	var holder: Node3D = _canvas()   # at Unity (-1, 2, 3), scale 0.01
+	var croot: Control = RT.root_control(holder)
+	var img: TextureRect = _image(croot, "Img", {"anchored_position": Vector2(50, 25), "size_delta": Vector2(40, 20)})
+	var kid: TextureRect = _image(img, "Kid", {"size_delta": Vector2(10, 10)})
+	ok(RT.frame_of(img) == null, "a UI object without anything 3D has no frame")
+	var frame: Node3D = RT.frame_of(img, true, Frame)
+	ok(frame != null and frame == RT.frame_of(img) and frame.get_parent() == img and frame.has_meta(RT.META_HELPER), "the 3D frame of a UI object is a helper child of its Control")
+	var spot := Node3D.new()
+	spot.name = "Spot"
+	spot.position = Vector3(-10, 5, -20)   # Unity (10, 5, -20), in the rect's space
+	frame.add_child(spot)
+	ok(RT.logical_parent(spot) == img, "what hangs in the frame is a child of the UI object")
+	var children: Array = RT.logical_children(img)
+	ok(children.has(spot) and children.has(kid) and not children.has(frame), "... among its children, the frame itself is not one: " + str(children))
+	await process_frame
+	await process_frame
+	near(RT.unity_from_godot(spot.global_transform).origin, Vector3(-1 + 0.5 + 0.1, 2 + 0.25 + 0.05, 3 - 0.2), "it is where the rect's pivot is, plus its local position at the rect's scale")
+	near(spot.position, Vector3(-10, 5, -20), "... and keeps its local position")
+	RT.set_anchored_position(img, Vector2(0, 0))
+	RT.set_local_scale(img, Vector3(2, 2, 2))
+	await process_frame
+	await process_frame
+	near(RT.unity_from_godot(spot.global_transform).origin, Vector3(-1 + 0.2, 2 + 0.1, 3 - 0.4), "the rect moves and grows: the frame follows")
+	RT.set_local_rotation(img, Quaternion(Vector3(0, 0, 1), PI * 0.5))
+	await process_frame
+	await process_frame
+	near(RT.unity_from_godot(spot.global_transform).origin, Vector3(-1 - 0.1, 2 + 0.2, 3 - 0.4), "... and turns with it (90 degrees about z: x becomes y)")
+	img.visible = false
+	await process_frame
+	await process_frame
+	ok(not frame.visible, "a hidden UI object hides what is in its frame (a Node3D does not inherit that)")
+	holder.queue_free()
+	await process_frame
+
+
+## Unity's defaults (centre anchors, centre pivot) plus the given values.
 func _rt(n: Node, v: Dictionary) -> void:
 	var full: Dictionary = RT._defaults()
 	full.merge(v, true)

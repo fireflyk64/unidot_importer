@@ -43,6 +43,11 @@ const META_HELPER := &"unidot_helper"
 ## whose basis is the rotation and scale of the holders down to this one and whose origin.z is
 ## how far the holder is from the plane it is drawn in), and each rect below shows the
 ## projection of the composed transform.
+## A helper child of a Control under which the 3D nodes of that UI object hang (its components
+## that are Node3Ds, child GameObjects that are no UI): runtime/ui_frame.gd keeps it where Unity
+## has the rect. Its children are children of the Control for scripts.
+const META_FRAME := &"unidot_frame"
+const FRAME := "Unidot3D"
 const META_PLAIN := &"unidot_plain_transform"
 const META_CARRY := &"unidot_carry"
 const GROUP_UI_SHAPE := &"unidot_ui_shape"
@@ -138,6 +143,8 @@ static func logical_parent(n: Node) -> Node:
 		return null
 	var s: Node = store(n)
 	var p: Node = s.get_parent()
+	if p != null and p.has_meta(META_FRAME):
+		p = p.get_parent()   # (the 3D frame of a UI object stands for that object)
 	if p == null:
 		return null
 	return identity(p)
@@ -155,10 +162,33 @@ static func logical_children(n: Node) -> Array:
 		hosts = [r, s] if r != null else [s]
 	for host in hosts:
 		for c in host.get_children():
+			if c.has_meta(META_FRAME):
+				# the 3D nodes of the object (its components among them: the caller's to tell)
+				for under in c.get_children():
+					out.append(under)
+				continue
 			if c.has_meta(META_HELPER):
 				continue
 			out.append(identity(c))
 	return out
+
+
+## The 3D frame of a UI object (see META_FRAME), made when `create` says so. `script`: this
+## module's ui_frame.gd, `owner`: the scene the node is saved with (the importer's).
+static func frame_of(c: Control, create: bool = false, script: Script = null, owner: Node = null) -> Node3D:
+	var found: Node3D = c.get_node_or_null(FRAME) as Node3D if c != null else null
+	if found != null or not create or c == null:
+		return found
+	found = Node3D.new()
+	found.name = FRAME
+	found.set_meta(META_HELPER, true)
+	found.set_meta(META_FRAME, true)
+	if script != null:
+		found.set_script(script)
+	c.add_child(found)
+	if owner != null:
+		found.owner = owner
+	return found
 
 
 ## Where the UI children of a GameObject node go: a canvas's root control, else the node itself.

@@ -45,9 +45,23 @@ static func _canvas(holder: Node, scene: Node) -> Dictionary:
 		entry["world_scale"] = [m.basis.x.length(), m.basis.y.length(), m.basis.z.length()]
 		entry["world_position"] = [m.origin.x, m.origin.y, m.origin.z]
 		entry["active"] = (holder as Node3D).visible
+	# what is not UI among the UI: [path, where it is in Unity's world]
+	entry["spatial"] = []
 	for c in RT.logical_children(holder):
-		_walk(c, "", entry["nodes"])
+		_walk(c, "", entry["nodes"], entry["spatial"])
+		if not RT.is_ui(c) and RT.store(c).get_parent() == holder:
+			_spatial(c, "", entry["spatial"])
 	return entry
+
+
+static func _spatial(n: Node, prefix: String, out: Array) -> void:
+	if not (n is Node3D) or n.has_meta(RT.META_CANVAS) or n is Viewport:
+		return
+	var path: String = prefix + ("/" if prefix != "" else "") + String(n.name)
+	var at: Vector3 = RT.unity_from_godot((n as Node3D).global_transform).origin
+	out.append({"path": path, "position": [at.x, at.y, at.z]})
+	for c in n.get_children():
+		_spatial(c, path, out)
 
 
 ## GameObject path of a node from the scene root (viewports and holders left out).
@@ -60,7 +74,7 @@ static func _unity_path(n: Node, scene: Node) -> String:
 	return "/".join(parts)
 
 
-static func _walk(n: Node, prefix: String, out: Array) -> void:
+static func _walk(n: Node, prefix: String, out: Array, spatial: Array) -> void:
 	if not RT.is_ui(n):
 		return
 	var path: String = prefix + ("/" if prefix != "" else "") + String(RT.store(n).name)
@@ -69,6 +83,9 @@ static func _walk(n: Node, prefix: String, out: Array) -> void:
 		ctl = RT.root_control(n)
 	if ctl == null:
 		return
+	var frame: Node3D = RT.frame_of(ctl)
+	for under in (frame.get_children() if frame != null else []):
+		_spatial(under, path, spatial)
 	var s: Vector2 = ctl.size
 	# (a rect of negative size: the Control has none, its corners are where that size puts them)
 	var unity_size: Vector2 = RT.rect_size(ctl) if RT.holder_of(ctl) == null else s
@@ -127,7 +144,7 @@ static func _walk(n: Node, prefix: String, out: Array) -> void:
 		e["graphic"] = [g.r, g.g, g.b, g.a]
 	out.append(e)
 	for c in RT.logical_children(id):
-		_walk(c, path, out)
+		_walk(c, path, out, spatial)
 
 
 ## Where a point of a control (its own Godot coordinates) is drawn, in Unity world space.
