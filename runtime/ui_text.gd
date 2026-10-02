@@ -11,7 +11,17 @@ extends RefCounted
 ## are applied, auto-sizing picks the largest font size that fits the rect.
 ##   {text, tmp: bool, rich: bool, size: float, style: int, auto: bool, min: float, max: float,
 ##    wrap: bool, overflow: int (0: drawn outside the rect, else cut at the rect),
-##    box: float (TextMeshPro 3D: width of the text box in units)}
+##    box: float (TextMeshPro 3D: width of the text box in units),
+##    first: int (TextMeshPro's firstVisibleCharacter: the text starts there),
+##    page: int (overflow mode 5: the page that is shown, from 1),
+##    linked: NodePath (overflow mode 6: the text that goes on where this one ends),
+##    outline: {ratio, color} and underlay: {x, y, dilate, color} (what the material of a
+##    TextMeshPro font draws around the glyphs; lengths in font sizes, y down),
+##    unit: float (the gradient scale of the font's atlas per unit of font size: the measure
+##    of the material's numbers),
+##    sprites: a Resource whose `unidot_tmp_sprites` metadata describes a TextMeshPro sprite
+##    asset ({point, scale, names: {name: index}, list: [{rect, width, height, scale}]}),
+##    sprite_sheet: Texture2D (its picture)}
 ## Font styles are TextMeshPro's: 1 bold, 2 italic, 4 underline, 8 lower case, 16 upper case,
 ## 32 small caps, 64 strikethrough (uGUI's FontStyle has the same two lowest bits).
 ##
@@ -54,10 +64,10 @@ const COLORS := {
 }
 const COLORS_TMP := {"green": "#00ff00", "orange": "#ff8000", "purple": "#a020f0"}
 
-const _RENDERED := ["b", "i", "u", "s", "strikethrough", "br", "color", "size", "align", "mark", "uppercase", "allcaps", "smallcaps", "lowercase"]
+const _RENDERED := ["b", "i", "u", "s", "strikethrough", "br", "color", "size", "align", "mark", "uppercase", "allcaps", "smallcaps", "lowercase", "sprite"]
 ## Tags that have no BBCode counterpart: they are not text either, and are dropped.
 const _DROPPED := ["nobr", "font", "material", "line-height", "line-indent", "indent", "margin", "margin-left", "margin-right",
-	"pos", "voffset", "cspace", "mspace", "gradient", "link", "style", "width", "sprite", "quad", "rotate", "page", "space",
+	"pos", "voffset", "cspace", "mspace", "gradient", "link", "style", "width", "quad", "rotate", "page", "space",
 	"font-weight", "alpha", "sup", "sub", "noparse"]
 ## uGUI's rich text knows only these.
 const _UGUI := ["b", "i", "size", "color", "material", "quad"]
@@ -158,7 +168,36 @@ static func render(n: Node) -> void:
 
 static func _show(n: RichTextLabel, s: Dictionary, size: float) -> void:
 	_rich_font_size(n, maxi(int(round(size)), 1))
-	n.text = to_bbcode(str(s["text"]), bool(s["rich"]), int(s["style"]), size, bool(s["tmp"]))
+	_effects(n, s, size)
+	n.text = to_bbcode(str(s["text"]), bool(s["rich"]), int(s["style"]), size, bool(s["tmp"]), -1, "", _options(s))
+
+
+## What to_bbcode needs beside the text: where it starts, the sprites of its <sprite> tags.
+static func _options(s: Dictionary, skip: int = 0, trim: bool = false) -> Dictionary:
+	return {"skip": int(s.get("first", 0)) + skip, "trim": trim, "sprites": s.get("sprites"), "sprite_sheet": s.get("sprite_sheet")}
+
+
+## A length the material gives in font sizes, in whole units: what is thinner than a unit but
+## can be seen is one unit.
+static func _units(ratio: float, size: float) -> int:
+	var v: float = ratio * size
+	if absf(v) < 0.25:
+		return 0
+	return int(signf(v)) * maxi(roundi(absf(v)), 1)
+
+
+## The outline and the underlay of a TextMeshPro material: the label's outline and shadow.
+static func _effects(n: RichTextLabel, s: Dictionary, size: float) -> void:
+	var outline = s.get("outline")
+	if outline is Dictionary:
+		n.add_theme_constant_override("outline_size", _units(float(outline.get("ratio", 0.0)), size))
+		n.add_theme_color_override("font_outline_color", outline.get("color", Color.BLACK))
+	var underlay = s.get("underlay")
+	if underlay is Dictionary:
+		n.add_theme_color_override("font_shadow_color", underlay.get("color", Color(0, 0, 0, 0.5)))
+		n.add_theme_constant_override("shadow_offset_x", _units(float(underlay.get("x", 0.0)), size))
+		n.add_theme_constant_override("shadow_offset_y", _units(float(underlay.get("y", 0.0)), size))
+		n.add_theme_constant_override("shadow_outline_size", _units(float(underlay.get("dilate", 0.0)), size))
 
 
 static func _rich_font_size(n: RichTextLabel, size: int) -> void:
@@ -183,6 +222,8 @@ static func set_fonts(n: Node, fonts: Array = FONTS) -> void:
 ## uGUI's vertical Truncate is stored as 3.
 const CUT_MODES := [1, 3, 5, 6]
 const ELLIPSIS := 1
+const PAGE := 5
+const LINKED := 6
 
 
 ## Does the drawing of a text with these settings depend on its rect (→ the helper child)?
@@ -214,11 +255,15 @@ static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
 		content = float(n.get_content_height())
 		over = content > n.size.y + 0.5
 		wide = mode in CUT_MODES and n.autowrap_mode == TextServer.AUTOWRAP_OFF and float(n.get_content_width()) > n.size.x + 0.5
-	if not over and not wide:
+	# a page that is not the first one is not what the node itself would draw
+	var paged: bool = mode == PAGE and int(s.get("page", 1)) > 1 and n.is_inside_tree() and n.size.x > 0.0
+	if not over and not wide and not paged:
 		if drawer != null:
 			n.remove_child(drawer)
 			drawer.queue_free()
 			n.visible_characters = -1
+		if mode == LINKED and n.is_inside_tree() and n.size.x > 0.0:
+			_link(n, s, -1)
 		return
 	if drawer == null:
 		drawer = RichTextLabel.new()
@@ -237,7 +282,7 @@ static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
 	for item in ["default_color", "font_outline_color", "font_shadow_color"]:
 		if n.has_theme_color_override(item):
 			drawer.add_theme_color_override(item, n.get_theme_color(item))
-	for item in ["outline_size", "shadow_offset_x", "shadow_offset_y", "line_separation"]:
+	for item in ["outline_size", "shadow_offset_x", "shadow_offset_y", "shadow_outline_size", "line_separation"]:
 		if n.has_theme_constant_override(item):
 			drawer.add_theme_constant_override(item, n.get_theme_constant(item))
 	drawer.autowrap_mode = n.autowrap_mode
@@ -257,26 +302,38 @@ static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
 		var tmp: bool = bool(s.get("tmp", true))
 		var style: int = int(s.get("style", 0))
 		var size: float = float(n.get_theme_font_size("normal_font_size"))
-		var total: int = visible_length(raw, rich, tmp)
+		var total: int = maxi(visible_length(raw, rich, tmp) - int(s.get("first", 0)), 0)
 		var tail: String = "…" if mode == ELLIPSIS else ""
 		var wrapped: bool = n.autowrap_mode != TextServer.AUTOWRAP_OFF
 		var lo: int = 0
 		var hi: int = total
 		while lo < hi:
 			var mid: int = (lo + hi + 1) / 2
-			drawer.text = to_bbcode(raw, rich, style, size, tmp, mid, tail if mid < total else "")
+			drawer.text = to_bbcode(raw, rich, style, size, tmp, mid, tail if mid < total else "", _options(s))
 			if float(drawer.get_content_height()) <= n.size.y + 0.5 and (wrapped or float(drawer.get_content_width()) <= n.size.x + 0.5):
 				lo = mid
 			else:
 				hi = mid - 1
-		drawer.text = to_bbcode(raw, rich, style, size, tmp, lo, tail if lo < total else "")
+		drawer.text = to_bbcode(raw, rich, style, size, tmp, lo, tail if lo < total else "", _options(s))
 		shown = minf(float(drawer.get_content_height()), n.size.y) if lo > 0 else 0.0
 		if lo == 0:
 			drawer.text = ""   # (not even one character and the ellipsis)
+	elif mode == PAGE:
+		# the lines of the page, laid out as a text of their own
+		var range_: Array = page_range(n, int(s.get("page", 1)))
+		if range_.is_empty():
+			drawer.text = ""
+			shown = 0.0
+		else:
+			drawer.text = to_bbcode(str(s.get("text", "")), bool(s.get("rich", true)), int(s.get("style", 0)), float(n.get_theme_font_size("normal_font_size")), bool(s.get("tmp", true)),
+				range_[1] - range_[0], "", _options(s, range_[0], true))
+			shown = minf(float(drawer.get_content_height()), n.size.y)
 	elif mode in CUT_MODES:
 		var fit: Array = whole_lines(n)
 		shown = fit[0]
 		characters = fit[1]
+		if mode == LINKED:
+			_link(n, s, characters)
 	drawer.visible_characters = characters
 	var y: float = 0.0
 	match n.vertical_alignment:
@@ -286,6 +343,58 @@ static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
 			y = n.size.y - shown
 	drawer.position = Vector2(0.0, y)
 	n.visible_characters = 0   # the node keeps the text (and measures it) but does not draw it
+
+
+## TextMeshPro's Linked overflow: the text that does not fit goes on in another text
+## component, which gets this one's string and the character it starts at. `characters`: how
+## many this text shows (-1: all of them, and the other one shows nothing).
+static func _link(n: RichTextLabel, s: Dictionary, characters: int) -> void:
+	var path = s.get("linked")
+	var target: Node = n.get_node_or_null(path) if path is NodePath and not (path as NodePath).is_empty() else null
+	if target == null or target == n or not target.has_meta(META):
+		return
+	var theirs: Dictionary = target.get_meta(META)
+	var text_: String = str(s.get("text", "")) if characters >= 0 else ""
+	var first: int = int(s.get("first", 0)) + characters if characters >= 0 else 0
+	if str(theirs.get("text", "")) != text_ or int(theirs.get("first", 0)) != first:
+		update(target, {"text": text_, "first": first})
+
+
+## The first character of a line of a laid out text (the number of characters when there is no
+## such line).
+static func _line_start(n: RichTextLabel, line: int) -> int:
+	var lo: int = 0
+	var hi: int = n.get_total_character_count()
+	while lo < hi:
+		var mid: int = (lo + hi) / 2
+		if n.get_character_line(mid) >= line:
+			hi = mid
+		else:
+			lo = mid + 1
+	return lo
+
+
+## TextMeshPro's Page overflow: the lines that fit the rect are a page, the next ones the next
+## page. → [first character, the one after the last] of a page (from 1), [] when the text has
+## no such page.
+static func page_range(n: RichTextLabel, page: int) -> Array:
+	var lines: int = n.get_line_count()
+	var content: float = float(n.get_content_height())
+	var start: int = 0
+	var number: int = 1
+	while start < lines:
+		var top: float = n.get_line_offset(start)
+		var last: int = start
+		for i in range(start + 1, lines):
+			var bottom: float = n.get_line_offset(i + 1) if i + 1 < lines else content
+			if bottom - top > n.size.y + 0.5:
+				break
+			last = i
+		if number == page:
+			return [_line_start(n, start), _line_start(n, last + 1)]
+		number += 1
+		start = last + 1
+	return []
 
 
 ## The lines of a text that fit its rect entirely: [their height, the number of characters
@@ -396,10 +505,14 @@ static func strip_tags(t: String) -> String:
 
 ## Unity rich text → BBCode. A `<...>` that is not a tag is text, as in Unity (`<<`, `<3`).
 ## `limit`: at most that many characters of the text are shown (as `visible_length` counts
-## them: text and line breaks), with `tail` after them when the text is longer (an ellipsis).
-static func to_bbcode(t: String, rich: bool, style: int, base_size: float, tmp: bool = true, limit: int = -1, tail: String = "") -> String:
+## them: text, line breaks and sprites), with `tail` after them when the text is longer (an
+## ellipsis). `options`: {skip: the characters before this one are left out (their tags still
+## count), trim: no line breaks at the end, sprites, sprite_sheet: the sprite asset of <sprite>
+## tags (see the settings)}.
+static func to_bbcode(t: String, rich: bool, style: int, base_size: float, tmp: bool = true, limit: int = -1, tail: String = "", options: Dictionary = {}) -> String:
 	var out: String = ""
 	var left: int = limit
+	var skip: int = int(options.get("skip", 0))
 	if style & BOLD:
 		out += "[b]"
 	if style & ITALIC:
@@ -417,7 +530,14 @@ static func to_bbcode(t: String, rich: bool, style: int, base_size: float, tmp: 
 	for piece in pieces:
 		var tag: String = piece[0]
 		var value: String = piece[1]
-		if limit >= 0 and (tag == "" or tag == "br"):
+		if skip > 0 and (tag == "" or tag == "br" or tag == "sprite"):
+			var skipped: int = value.length() if tag == "" else 1
+			if skipped <= skip:
+				skip -= skipped
+				continue
+			value = value.substr(skip)
+			skip = 0
+		if limit >= 0 and (tag == "" or tag == "br" or tag == "sprite"):
 			var length: int = value.length() if tag == "" else 1
 			if length > left:
 				# the cut: what still fits of this piece (no blanks before the tail), the tail,
@@ -438,6 +558,8 @@ static func to_bbcode(t: String, rich: bool, style: int, base_size: float, tmp: 
 				out += "[/s]"
 			"br":
 				out += "\n"
+			"sprite":
+				out += _sprite(value, float(sizes.back()), options)
 			"color":
 				out += "[color=" + _color(value, tmp) + "]"
 				colors += 1
@@ -472,6 +594,9 @@ static func to_bbcode(t: String, rich: bool, style: int, base_size: float, tmp: 
 				lower = maxi(lower - 1, 0)
 			_:
 				pass   # a tag without a counterpart (and "/align": BBCode alignment ends with its paragraph)
+	if bool(options.get("trim", false)):
+		while out.ends_with("\n"):
+			out = out.substr(0, out.length() - 1)
 	while sizes.size() > 1:
 		sizes.pop_back()
 		out += "[/font_size]"
@@ -489,7 +614,8 @@ static func to_bbcode(t: String, rich: bool, style: int, base_size: float, tmp: 
 	return out
 
 
-## The number of characters a text shows (its tags are not shown; a line break is one).
+## The number of characters a text shows (its tags are not shown; a line break is one, and
+## so is a sprite).
 static func visible_length(t: String, rich: bool, tmp: bool = true) -> int:
 	if not rich:
 		return t.length()
@@ -497,9 +623,45 @@ static func visible_length(t: String, rich: bool, tmp: bool = true) -> int:
 	for piece in _tokens(t, tmp):
 		if piece[0] == "":
 			count += (piece[1] as String).length()
-		elif piece[0] == "br":
+		elif piece[0] == "br" or piece[0] == "sprite":
 			count += 1
 	return count
+
+
+## `<sprite=1>`, `<sprite index=1>`, `<sprite name="x">`, `<sprite="asset" index=1>`: a picture
+## of the text's sprite asset, scaled with the font size as TextMeshPro scales it. Without the
+## asset (or the sprite) nothing is drawn.
+static func _sprite(value: String, size: float, options: Dictionary) -> String:
+	var asset = options.get("sprites")
+	var sheet = options.get("sprite_sheet")
+	if not (asset is Resource) or not (sheet is Texture2D) or not (asset as Resource).has_meta(&"unidot_tmp_sprites") or (sheet as Texture2D).resource_path.is_empty():
+		return ""
+	var info: Dictionary = (asset as Resource).get_meta(&"unidot_tmp_sprites")
+	var list: Array = info.get("list", [])
+	var index: int = -1
+	var v: String = value.strip_edges()
+	var named: int = v.find("name=")
+	var indexed: int = v.find("index=")
+	if named >= 0:
+		var name: String = v.substr(named + 5).strip_edges()
+		if name.begins_with("\""):
+			name = name.substr(1, name.find("\"", 1) - 1)
+		else:
+			name = name.get_slice(" ", 0)
+		index = int((info.get("names", {}) as Dictionary).get(name, -1))
+	elif indexed >= 0:
+		index = v.substr(indexed + 6).get_slice(" ", 0).to_int()
+	elif v.is_valid_int() or (v.get_slice(" ", 0)).is_valid_int():
+		index = v.get_slice(" ", 0).to_int()
+	if index < 0 or index >= list.size():
+		return ""
+	var sprite: Dictionary = list[index]
+	var rect: Rect2 = sprite.get("rect", Rect2())
+	var point: float = float(info.get("point", 0.0))
+	var k: float = (size / point if point > 0.0 else 1.0) * float(info.get("scale", 1.0)) * float(sprite.get("scale", 1.0))
+	# (the rect is Unity's: its y is from the bottom of the sheet)
+	return "[img width=%d height=%d region=%d,%d,%d,%d]%s[/img]" % [maxi(roundi(float(sprite.get("width", rect.size.x)) * k), 1), maxi(roundi(float(sprite.get("height", rect.size.y)) * k), 1),
+		int(rect.position.x), int(float((sheet as Texture2D).get_height()) - rect.position.y - rect.size.y), int(rect.size.x), int(rect.size.y), (sheet as Texture2D).resource_path]
 
 
 static func _case(t: String, upper: int, lower: int) -> String:

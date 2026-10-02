@@ -151,11 +151,95 @@ func _text_mesh_3d(obj: RefCounted, state: RefCounted, node: Node3D) -> void:
 	stats["text_3d"] = int(stats.get("text_3d", 0)) + 1
 
 
-## TextMeshPro's font asset script.
+## TextMeshPro's font asset and sprite asset scripts.
 const TMP_FONT_ASSET := "71c1514a6bd24e1e882cebbe1904ce04"
+const TMP_SPRITE_ASSET := "84a92b25f83d49b9bc132d206b370281"
+## TextMeshPro's settings (one asset of the project, "TMP Settings"): what every text falls
+## back to. It becomes a Resource with the metadata {sprites: guid of the default sprite
+## asset, fallbacks: [guid of a font asset]}.
+const TMP_SETTINGS := "2705215ac5b84b70bacc50632be6e391"
+const META_TMP_SETTINGS := &"unidot_tmp_settings"
 ## Metadata of the Font a font asset becomes: {family, style, source: bool (the font file is in
-## the project), bold (weight of the bold style), bold_spacing, italic (slant of the italic style)}
+## the project), bold (weight of the bold style), bold_spacing, italic (slant of the italic style),
+## point (the size the atlas was made at), material (see _tmp_material: the asset's own
+## material), fallbacks: [guid of a font asset]}
 const META_FONT_ASSET := &"unidot_tmp_font"
+## Metadata of the Material a TextMeshPro material becomes (see _tmp_material).
+const META_TMP_MATERIAL := &"unidot_tmp_material"
+## Metadata of the Resource a sprite asset becomes: {sheet: reference of its picture, point,
+## scale, names: {name: index}, list: [{rect (Unity's: y from the bottom), width, height, scale}]}
+const META_TMP_SPRITES := &"unidot_tmp_sprites"
+
+
+## What the distance field shader of a TextMeshPro material draws around the glyphs, in atlas
+## pixels per unit of the gradient scale: {gradient, outline (the part outside the glyph),
+## outline_color, underlay: bool, underlay_x, underlay_y (up), underlay_dilate, underlay_color}.
+## Empty for any other material.
+func _tmp_material(mat: RefCounted) -> Dictionary:
+	if mat == null or not mat.has_method("get_float_properties"):
+		return {}
+	var floats: Dictionary = mat.get_float_properties()
+	if not floats.has("_GradientScale"):
+		return {}
+	var colors: Dictionary = mat.get_color_properties()
+	var keywords: Dictionary = mat.get_keywords()
+	var ratio_a: float = _to_float(floats.get("_ScaleRatioA", 1.0))
+	var ratio_c: float = _to_float(floats.get("_ScaleRatioC", 1.0))
+	return {
+		"gradient": _to_float(floats.get("_GradientScale", 0.0)),
+		"outline": _to_float(floats.get("_OutlineWidth", 0.0)) * ratio_a * 0.5,
+		"outline_color": colors.get("_OutlineColor", Color.BLACK),
+		"underlay": keywords.has("UNDERLAY_ON") or keywords.has("UNDERLAY_INNER"),
+		"underlay_x": _to_float(floats.get("_UnderlayOffsetX", 0.0)) * ratio_c,
+		"underlay_y": _to_float(floats.get("_UnderlayOffsetY", 0.0)) * ratio_c,
+		"underlay_dilate": _to_float(floats.get("_UnderlayDilate", 0.0)) * ratio_c * 0.5,
+		"underlay_color": colors.get("_UnderlayColor", Color(0, 0, 0, 0.5)),
+	}
+
+
+## A material preset of TextMeshPro (a material file of its own) keeps what its shader draws.
+func handle_asset_resource(obj: RefCounted, res: Resource) -> void:
+	if obj.type != "Material":
+		return
+	var info: Dictionary = _tmp_material(obj)
+	if not info.is_empty():
+		res.set_meta(META_TMP_MATERIAL, info)
+
+
+## A TextMeshPro sprite asset: a sheet of pictures for <sprite> tags.
+func _sprite_asset(obj: RefCounted) -> Resource:
+	var keys: Dictionary = obj.keys
+	var face: Dictionary = keys["m_FaceInfo"] if keys.get("m_FaceInfo") is Dictionary else {}
+	var glyphs: Dictionary = {}
+	for glyph in keys.get("m_SpriteGlyphTable", []) if keys.get("m_SpriteGlyphTable") is Array else []:
+		if glyph is Dictionary:
+			glyphs[_to_int(glyph.get("m_Index", 0))] = glyph
+	var names: Dictionary = {}
+	var list: Array = []
+	for character in keys.get("m_SpriteCharacterTable", []) if keys.get("m_SpriteCharacterTable") is Array else []:
+		if not (character is Dictionary):
+			continue
+		var glyph = glyphs.get(_to_int(character.get("m_GlyphIndex", 0)))
+		var entry: Dictionary = {}
+		if glyph is Dictionary:
+			var r: Dictionary = glyph["m_GlyphRect"] if glyph.get("m_GlyphRect") is Dictionary else {}
+			var m: Dictionary = glyph["m_Metrics"] if glyph.get("m_Metrics") is Dictionary else {}
+			var rect := Rect2(_to_float(r.get("m_X", 0)), _to_float(r.get("m_Y", 0)), _to_float(r.get("m_Width", 0)), _to_float(r.get("m_Height", 0)))
+			entry = {"rect": rect, "width": _to_float(m.get("m_Width", rect.size.x)), "height": _to_float(m.get("m_Height", rect.size.y)),
+				"scale": _to_float(character.get("m_Scale", 1.0)) * _to_float(glyph.get("m_Scale", 1.0))}
+		names[str(character.get("m_Name", ""))] = list.size()
+		list.append(entry)
+	# (sprite assets made before TextMeshPro 1.4 list their sprites in one table)
+	if list.is_empty() and keys.get("spriteInfoList") is Array:
+		for sprite in keys["spriteInfoList"]:
+			if sprite is Dictionary:
+				var rect := Rect2(_to_float(sprite.get("x", 0)), _to_float(sprite.get("y", 0)), _to_float(sprite.get("width", 0)), _to_float(sprite.get("height", 0)))
+				names[str(sprite.get("name", ""))] = list.size()
+				list.append({"rect": rect, "width": rect.size.x, "height": rect.size.y, "scale": _to_float(sprite.get("scale", 1.0))})
+	var asset := Resource.new()
+	asset.set_meta(META_TMP_SPRITES, {"sheet": keys.get("spriteSheet"), "point": _to_float(face.get("m_PointSize", 0.0)), "scale": _to_float(face.get("m_Scale", 1.0)), "names": names, "list": list})
+	stats["sprite_assets"] = int(stats.get("sprite_assets", 0)) + 1
+	return asset
 
 
 ## A TextMeshPro font asset is an atlas of glyphs made from a font file. Godot draws text from
@@ -164,9 +248,31 @@ const META_FONT_ASSET := &"unidot_tmp_font"
 ## asset's family when there is one, the stand-in family otherwise.
 func handle_scripted_object(obj: RefCounted):
 	var script_ref = obj.keys.get("m_Script")
+	if script_ref is Array and script_ref.size() >= 3 and str(script_ref[2]) == TMP_SPRITE_ASSET:
+		return _sprite_asset(obj)
+	if script_ref is Array and script_ref.size() >= 3 and str(script_ref[2]) == TMP_SETTINGS:
+		var defaults := Resource.new()
+		var sprites_ref = obj.keys.get("m_defaultSpriteAsset")
+		var global_fallbacks: Array = []
+		for fallback in obj.keys["m_fallbackFontAssets"] if obj.keys.get("m_fallbackFontAssets") is Array else []:
+			if fallback is Array and fallback.size() >= 3 and typeof(fallback[2]) == TYPE_STRING and fallback[2] != "":
+				global_fallbacks.append(fallback[2])
+		defaults.set_meta(META_TMP_SETTINGS, {"sprites": str(sprites_ref[2]) if sprites_ref is Array and sprites_ref.size() >= 3 and sprites_ref[1] != 0 and typeof(sprites_ref[2]) == TYPE_STRING else "", "fallbacks": global_fallbacks})
+		_tmp_defaults = null   # (looked for again)
+		return defaults
 	if not (script_ref is Array) or script_ref.size() < 3 or str(script_ref[2]) != TMP_FONT_ASSET:
 		return null
 	var keys: Dictionary = obj.keys
+	# the asset's own material is an object of its file; its fallbacks are other font assets
+	var material: Dictionary = {}
+	var material_ref = keys.get("material")
+	if material_ref is Array and material_ref.size() >= 2 and obj.meta.parsed != null and obj.meta.parsed.assets.has(material_ref[1]):
+		material = _tmp_material(obj.meta.parsed.assets[material_ref[1]])
+	var fallbacks: Array = []
+	var fallback_refs = keys.get("m_FallbackFontAssetTable", keys.get("fallbackFontAssets"))
+	for fallback in fallback_refs if fallback_refs is Array else []:
+		if fallback is Array and fallback.size() >= 3 and typeof(fallback[2]) == TYPE_STRING and fallback[2] != "":
+			fallbacks.append(fallback[2])
 	var guid: String = str(keys.get("m_SourceFontFileGUID", ""))
 	if guid.length() != 32 and keys.get("m_CreationSettings") is Dictionary:
 		guid = str((keys["m_CreationSettings"] as Dictionary).get("sourceFontFileGUID", ""))
@@ -191,6 +297,8 @@ func handle_scripted_object(obj: RefCounted):
 		"family": family, "style": str(face.get("m_StyleName", "")), "source": source != null,
 		"bold": _to_float(keys.get("boldStyle", 0.75)), "bold_spacing": _to_float(keys.get("boldSpacing", 7.0)),
 		"italic": _to_float(keys.get("italicStyle", 35.0)),
+		"point": _to_float(face.get("m_PointSize", (keys["m_fontInfo"] as Dictionary).get("PointSize", 0.0) if keys.get("m_fontInfo") is Dictionary else 0.0)),
+		"material": material, "fallbacks": fallbacks,
 	})
 	stats["font_assets"] = int(stats.get("font_assets", 0)) + 1
 	return font
@@ -1173,20 +1281,73 @@ func _selectable(ctl: Control, keys: Dictionary, obj: RefCounted, state: RefCoun
 
 
 var _families: Dictionary = {}   # font → [regular, bold, italic, bold italic]
+var _tmp_defaults = null         # the project's TextMeshPro settings, once they were looked for
+
+
+## The project's TextMeshPro settings: {sprites, fallbacks} (empty without the asset).
+func _tmp_settings_asset() -> Dictionary:
+	if _tmp_defaults == null:
+		_tmp_defaults = {}
+		for path in database.path_to_meta if database != null else {}:
+			if not str(path).get_file().begins_with("TMP Settings."):
+				continue
+			var found = load("res://" + str(path)) if ResourceLoader.exists("res://" + str(path)) else null
+			if found is Resource and (found as Resource).has_meta(META_TMP_SETTINGS):
+				_tmp_defaults = (found as Resource).get_meta(META_TMP_SETTINGS)
+				break
+	return _tmp_defaults
+
+
+## The fonts a text looks in for what its own font does not have: the font assets `guids`.
+func _fallback_fonts(guids: Array, obj: RefCounted, own: Font) -> Array[Font]:
+	var out: Array[Font] = []
+	for guid in guids:
+		if obj != null and obj.meta.lookup_meta_by_guid(str(guid)) != null:
+			var fallback: Font = obj.meta.get_godot_resource([null, 11400000, str(guid), 2], true) as Font
+			if fallback != null and fallback != own and not out.has(fallback):
+				out.append(fallback)
+	return out
 
 ## Bold and italic of a font that comes as one file: synthesized. A TextMeshPro font asset says
 ## how (TextMeshPro makes both from the regular glyphs as well: `italicStyle` is the slant in
 ## hundredths, 35 by default).
-func _font_family(font: Font) -> Array:
+func _font_family(font: Font, obj: RefCounted = null) -> Array:
+	# (TextMeshPro's settings name fallbacks for every text)
+	var everywhere: Array = _tmp_settings_asset().get("fallbacks", []) if obj != null else []
+	if font != null and font.has_meta(META_FONT_ASSET):
+		var asset_info: Dictionary = font.get_meta(META_FONT_ASSET)
+		if not bool(asset_info.get("source", false)) and str(asset_info.get("family", "")).is_empty():
+			font = null
 	if font == null:
-		return UiText.FONTS
+		# the stand-in family
+		var global_fonts: Array[Font] = _fallback_fonts(everywhere, obj, null)
+		if global_fonts.is_empty():
+			return UiText.FONTS
+		if not _families.has(&"stand-in"):
+			var family: Array = []
+			for member in UiText.FONTS:
+				var wrapped := FontVariation.new()
+				wrapped.base_font = member
+				wrapped.fallbacks = global_fonts
+				family.append(wrapped)
+			_families[&"stand-in"] = family
+		return _families[&"stand-in"]
 	if not _families.has(font):
 		var slant: float = 0.2
+		var guids: Array = []
 		if font.has_meta(META_FONT_ASSET):
 			var info: Dictionary = font.get_meta(META_FONT_ASSET)
-			if not bool(info.get("source", false)) and str(info.get("family", "")).is_empty():
-				return UiText.FONTS
 			slant = clampf(float(info.get("italic", 35.0)) * 0.01, 0.0, 1.0)
+			# what the font does not have is looked for in the asset's fallbacks
+			guids = (info.get("fallbacks", []) as Array).duplicate()
+		guids.append_array(everywhere)
+		var fallbacks: Array[Font] = _fallback_fonts(guids, obj, font)
+		var regular: Font = font
+		if not fallbacks.is_empty():
+			# (the asset's font is a file of its own: the fallbacks are this scene's)
+			var with_fallbacks := FontVariation.new()
+			with_fallbacks.base_font = font
+			regular = with_fallbacks
 		var bold := FontVariation.new()
 		bold.base_font = font
 		bold.variation_embolden = 0.8
@@ -1197,7 +1358,10 @@ func _font_family(font: Font) -> Array:
 		both.base_font = font
 		both.variation_embolden = 0.8
 		both.variation_transform = italic.variation_transform
-		_families[font] = [font, bold, italic, both]
+		if not fallbacks.is_empty():
+			for member in [regular, bold, italic, both]:
+				member.fallbacks = fallbacks
+		_families[font] = [regular, bold, italic, both]
 	return _families[font]
 
 
@@ -1208,8 +1372,55 @@ func _tmp_fonts(keys: Dictionary, obj: RefCounted) -> Array:
 		return UiText.FONTS
 	var ref: Array = obj.get_ref(keys, "m_fontAsset")
 	if ref.size() < 3 or ref[1] == 0 or typeof(ref[2]) != TYPE_STRING or obj.meta.lookup_meta_by_guid(ref[2]) == null:
-		return UiText.FONTS
-	return _font_family(obj.meta.get_godot_resource(ref, true) as Font)
+		return _font_family(null, obj)
+	return _font_family(obj.meta.get_godot_resource(ref, true) as Font, obj)
+
+
+## What a TextMeshPro text takes from other objects and assets: the text it goes on in, the
+## outline and underlay of its material, its sprite asset (→ the settings of runtime/ui_text.gd).
+func _tmp_assets(settings: Dictionary, keys: Dictionary, obj: RefCounted, ctl: Control) -> void:
+	if _to_int(keys.get("m_firstVisibleCharacter", 0)) > 0:
+		settings["first"] = _to_int(keys["m_firstVisibleCharacter"])
+	if int(settings["overflow"]) == UiText.PAGE:
+		settings["page"] = maxi(_to_int(keys.get("m_pageToDisplay", 1)), 1)
+	if int(settings["overflow"]) == UiText.LINKED and keys.has("m_linkedTextComponent"):
+		var linked: NodePath = _ref_path(obj.get_ref(keys, "m_linkedTextComponent"), obj, ctl, String(UiText.META), "linked")
+		if linked != NodePath():
+			settings["linked"] = linked
+	var font_ref: Array = obj.get_ref(keys, "m_fontAsset")
+	var font: Font = null
+	if font_ref.size() >= 3 and font_ref[1] != 0 and typeof(font_ref[2]) == TYPE_STRING and obj.meta.lookup_meta_by_guid(font_ref[2]) != null:
+		font = obj.meta.get_godot_resource(font_ref, true) as Font
+	var info: Dictionary = font.get_meta(META_FONT_ASSET) if font != null and font.has_meta(META_FONT_ASSET) else {}
+	var material: Dictionary = info.get("material", {})
+	# a material preset in place of the asset's own material
+	var material_ref: Array = obj.get_ref(keys, "m_sharedMaterial")
+	if material_ref.size() >= 3 and material_ref[1] != 0 and typeof(material_ref[2]) == TYPE_STRING and material_ref[2] != "" and (font_ref.size() < 3 or material_ref[2] != font_ref[2]) and obj.meta.lookup_meta_by_guid(material_ref[2]) != null:
+		var preset = obj.meta.get_godot_resource(material_ref, true)
+		if preset is Resource and (preset as Resource).has_meta(META_TMP_MATERIAL):
+			material = (preset as Resource).get_meta(META_TMP_MATERIAL)
+	var point: float = float(info.get("point", 0.0))
+	if point > 0.0 and not material.is_empty():
+		# the shader's lengths are fractions of the gradient scale, which is in pixels of an
+		# atlas made at `point`: per unit of font size
+		var unit: float = float(material.get("gradient", 0.0)) / point
+		settings["unit"] = unit
+		if float(material.get("outline", 0.0)) > 0.0:
+			settings["outline"] = {"ratio": float(material["outline"]) * unit, "color": material.get("outline_color", Color.BLACK)}
+		if bool(material.get("underlay", false)):
+			settings["underlay"] = {"x": float(material.get("underlay_x", 0.0)) * unit, "y": -float(material.get("underlay_y", 0.0)) * unit,
+				"dilate": float(material.get("underlay_dilate", 0.0)) * unit, "color": material.get("underlay_color", Color(0, 0, 0, 0.5))}
+	var sprite_ref: Array = obj.get_ref(keys, "m_spriteAsset")
+	if (sprite_ref.size() < 3 or sprite_ref[1] == 0) and str(_tmp_settings_asset().get("sprites", "")) != "":
+		sprite_ref = [null, 11400000, str(_tmp_settings_asset()["sprites"]), 2]   # the project's default sprite asset
+	if sprite_ref.size() >= 3 and sprite_ref[1] != 0 and typeof(sprite_ref[2]) == TYPE_STRING and obj.meta.lookup_meta_by_guid(sprite_ref[2]) != null:
+		var asset = obj.meta.get_godot_resource(sprite_ref, true)
+		if asset is Resource and (asset as Resource).has_meta(META_TMP_SPRITES):
+			var sheet_ref = ((asset as Resource).get_meta(META_TMP_SPRITES) as Dictionary).get("sheet")
+			var sheet: Texture2D = _sprite_texture(sheet_ref, obj) if sheet_ref is Array else null
+			if sheet != null:
+				settings["sprites"] = asset
+				settings["sprite_sheet"] = sheet
 
 
 ## A text component on its Control: the settings go to the `unidot_text` metadata and
@@ -1291,7 +1502,9 @@ func _configure_tmp(ctl: Control, keys: Dictionary, obj: RefCounted, state: RefC
 	var h: int = _tmp_halign(ha)
 	var v: int = _tmp_valign(va)
 	var col: Color = keys["m_fontColor"] if keys.get("m_fontColor") is Color else Color.WHITE
-	_text_control(ctl, _tmp_settings(keys), col, _to_int(keys.get("m_Enabled", 1)) != 0, h, v, _tmp_fonts(keys, obj), state)
+	var settings: Dictionary = _tmp_settings(keys)
+	_tmp_assets(settings, keys, obj, ctl)
+	_text_control(ctl, settings, col, _to_int(keys.get("m_Enabled", 1)) != 0, h, v, _tmp_fonts(keys, obj), state)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1516,7 +1729,8 @@ func _override_component(kind: String, ctl: Control, uprops: Dictionary, obj: Re
 
 func _override_text(tmp: bool, ctl: Control, uprops: Dictionary) -> void:
 	var changes: Dictionary = {}
-	var fields: Array = [["m_text", "text"], ["m_fontSize", "size"], ["m_fontStyle", "style"], ["m_enableAutoSizing", "auto"], ["m_fontSizeMin", "min"], ["m_fontSizeMax", "max"], ["m_overflowMode", "overflow"], ["m_isRichText", "rich"]]
+	var fields: Array = [["m_text", "text"], ["m_fontSize", "size"], ["m_fontStyle", "style"], ["m_enableAutoSizing", "auto"], ["m_fontSizeMin", "min"], ["m_fontSizeMax", "max"], ["m_overflowMode", "overflow"], ["m_isRichText", "rich"],
+		["m_pageToDisplay", "page"], ["m_firstVisibleCharacter", "first"]]
 	if not tmp:
 		fields = [["m_Text", "text"], ["m_FontData.m_FontSize", "size"], ["m_FontData.m_FontStyle", "style"], ["m_FontData.m_BestFit", "auto"], ["m_FontData.m_MinSize", "min"], ["m_FontData.m_MaxSize", "max"], ["m_FontData.m_RichText", "rich"]]
 	for entry in fields:
@@ -1530,8 +1744,8 @@ func _override_text(tmp: bool, ctl: Control, uprops: Dictionary) -> void:
 				changes[entry[1]] = _to_float(v)
 			"style":
 				changes["style"] = _to_int(v) if tmp else (_to_int(v) & 3)
-			"overflow":
-				changes["overflow"] = _to_int(v)
+			"overflow", "page", "first":
+				changes[entry[1]] = _to_int(v)
 			_:
 				changes[entry[1]] = _to_int(v) != 0
 	var current: Dictionary = UiText.settings(ctl)

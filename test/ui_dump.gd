@@ -70,6 +70,12 @@ static func _walk(n: Node, prefix: String, out: Array) -> void:
 	if ctl == null:
 		return
 	var s: Vector2 = ctl.size
+	# (a rect of negative size: the Control has none, its corners are where that size puts them)
+	var unity_size: Vector2 = RT.rect_size(ctl) if RT.holder_of(ctl) == null else s
+	if unity_size.x < 0.0:
+		s.x = unity_size.x
+	if unity_size.y < 0.0:
+		s.y = unity_size.y
 	var corners: Array = []
 	for p in [Vector2(0, s.y), Vector2(0, 0), Vector2(s.x, 0), Vector2(s.x, s.y)]:
 		var w: Vector3 = rendered(ctl, p)
@@ -96,6 +102,23 @@ static func _walk(n: Node, prefix: String, out: Array) -> void:
 		e["text"] = ctl.get_parsed_text()
 		e["font_size"] = ctl.get_theme_font_size("normal_font_size")
 		e["font"] = font_family(ctl.get_theme_font("normal_font"))
+		# what is drawn around the glyphs, the fonts behind the font, the pictures in the text
+		if ctl.has_theme_constant_override("outline_size") and ctl.get_theme_constant("outline_size") > 0:
+			var oc: Color = ctl.get_theme_color("font_outline_color")
+			e["outline"] = [ctl.get_theme_constant("outline_size"), oc.r, oc.g, oc.b, oc.a]
+		if ctl.has_theme_color_override("font_shadow_color") and ctl.get_theme_color("font_shadow_color").a > 0.0:
+			var sc: Color = ctl.get_theme_color("font_shadow_color")
+			e["shadow"] = [ctl.get_theme_constant("shadow_offset_x"), ctl.get_theme_constant("shadow_offset_y"), sc.r, sc.g, sc.b, sc.a]
+		var fallbacks: Array = []
+		var shown_font: Font = ctl.get_theme_font("normal_font")
+		for fallback in (shown_font.fallbacks if shown_font != null else []):
+			fallbacks.append(font_family(fallback))
+		e["fallbacks"] = fallbacks
+		var pictures: Array = []
+		var img := RegEx.create_from_string("\\[img width=(\\d+) height=(\\d+) region=(\\d+),(\\d+),(\\d+),(\\d+)\\]")
+		for found in img.search_all(ctl.text):
+			pictures.append([found.get_string(3).to_int(), found.get_string(4).to_int(), found.get_string(5).to_int(), found.get_string(6).to_int(), found.get_string(1).to_int(), found.get_string(2).to_int()])
+		e["sprites"] = pictures
 	elif ctl is Label or ctl is Button or ctl is LineEdit:
 		e["text"] = str(ctl.text)
 		e["font_size"] = ctl.get_theme_font_size("font_size")

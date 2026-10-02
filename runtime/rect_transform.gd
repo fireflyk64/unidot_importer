@@ -260,8 +260,9 @@ static func values(n: Node) -> Dictionary:
 		var pv: Vector2 = _control_pivot(c)
 		var omin := Vector2(c.offset_left, -c.offset_bottom)
 		var omax := Vector2(c.offset_right, -c.offset_top)
-		var sd: Vector2 = omax - omin
 		var extra: Dictionary = c.get_meta(META_RECT) if c.has_meta(META_RECT) else {}
+		# (below a rect of negative size the offsets are not Unity's: see set_values)
+		var sd: Vector2 = extra.get("size_delta", omax - omin)
 		var q: Quaternion = extra["rotation"] if extra.has("rotation") else Quaternion(Vector3(0.0, 0.0, 1.0), -c.rotation)
 		var sc: Vector3 = extra["scale"] if extra.has("scale") else Vector3(c.scale.x, c.scale.y, float(extra.get("scale_z", 1.0)))
 		return {
@@ -427,6 +428,29 @@ static func set_values(n: Node, v: Dictionary) -> void:
 		c.set_anchor(SIDE_RIGHT, p["anchor_right"], false, true)
 		c.set_anchor(SIDE_TOP, p["anchor_top"], false, true)
 		c.set_anchor(SIDE_BOTTOM, p["anchor_bottom"], false, true)
+		var extra = p["metadata/" + String(META_RECT)]
+		# A rect stretched with insets larger than its parent has a negative size, and Unity
+		# lays its children out against it all the same. A Control has no size below nothing:
+		# the size the rect should have is kept (`size`), and what is below it is placed as if
+		# its parent had that size (Godot multiplies the anchors by 0: the offsets make up for
+		# it, and the Unity values are kept beside them).
+		var parent_size: Vector2 = _parent_size(c) if c.get_parent() is Control else Vector2.ZERO
+		var own_size: Vector2 = ((full["anchor_max"] as Vector2) - (full["anchor_min"] as Vector2)) * parent_size + (full["size_delta"] as Vector2)
+		var was_negative = (c.get_meta(META_RECT) as Dictionary).get("size") if c.has_meta(META_RECT) else null
+		if c.get_parent() is Control and (parent_size.x < 0.0 or parent_size.y < 0.0):
+			if parent_size.x < 0.0:
+				p["offset_left"] += p["anchor_left"] * parent_size.x
+				p["offset_right"] += p["anchor_right"] * parent_size.x
+			if parent_size.y < 0.0:
+				p["offset_top"] += p["anchor_top"] * parent_size.y
+				p["offset_bottom"] += p["anchor_bottom"] * parent_size.y
+			extra = extra if extra != null else {}
+			extra["size_delta"] = full["size_delta"]
+			if not extra.has("anchored_position"):
+				extra["anchored_position"] = full["anchored_position"]
+		if c.get_parent() is Control and (own_size.x < 0.0 or own_size.y < 0.0):
+			extra = extra if extra != null else {}
+			extra["size"] = own_size
 		c.offset_left = p["offset_left"]
 		c.offset_right = p["offset_right"]
 		c.offset_top = p["offset_top"]
@@ -435,12 +459,13 @@ static func set_values(n: Node, v: Dictionary) -> void:
 		c.pivot_offset_ratio = p["pivot_offset_ratio"]
 		c.rotation = p["rotation"]
 		c.scale = p["scale"]
-		var extra = p["metadata/" + String(META_RECT)]
 		if extra == null:
 			if c.has_meta(META_RECT):
 				c.remove_meta(META_RECT)
 		else:
 			c.set_meta(META_RECT, extra)
+		var now_negative = extra.get("size") if extra != null else null
+		resized_below(c, was_negative != now_negative)
 		var handed = p["metadata/" + String(META_CARRY)]
 		if handed is Transform3D:
 			var before = c.get_meta(META_CARRY) if c.has_meta(META_CARRY) else null
@@ -467,6 +492,24 @@ static func set_values(n: Node, v: Dictionary) -> void:
 		n3.quaternion = Quaternion(q.x, -q.y, -q.z, q.w).normalized()
 		n3.scale = _safe_scale(full["scale"])
 	_island_resized(s)
+
+
+## The size of `c` was set (set_values, a layout group, the scaler of a screen canvas): the
+## rects below it whose size is negative, was negative or becomes negative are placed again
+## (`all`: every rect below it, when `c` itself went to or from a negative size).
+static func resized_below(c: Control, all: bool = false) -> void:
+	var size: Vector2 = rect_size(c)
+	for ch in c.get_children():
+		if not (ch is Control) or ch.has_meta(META_HELPER) or ch.has_meta(META_VIEW) or not _prefab_rect(ch).is_empty():
+			continue
+		var u: Control = ch
+		var kept: Dictionary = u.get_meta(META_RECT) if u.has_meta(META_RECT) else {}
+		var again: bool = all or kept.has("size") or kept.has("size_delta")
+		if not again:
+			# stretched with insets larger than what it is stretched over
+			again = (u.anchor_right - u.anchor_left) * size.x + u.offset_right - u.offset_left < 0.0 or (u.anchor_bottom - u.anchor_top) * size.y + u.offset_bottom - u.offset_top < 0.0
+		if again:
+			set_values(u, {})
 
 
 ## (canvas scales are small: a 0.005 scale has a determinant of 1e-7, far below is_zero_approx)
@@ -508,7 +551,15 @@ static func _island_resized(holder: Node) -> void:
 static func rect_size(n: Node) -> Vector2:
 	var s: Node = store(n)
 	if s is Control:
-		return _control_rect(s).size
+		var size: Vector2 = _control_rect(s).size
+		# a size a Control cannot have (see set_values), while the Control is still that small
+		var kept = (s.get_meta(META_RECT) as Dictionary).get("size") if s.has_meta(META_RECT) else null
+		if kept is Vector2:
+			if kept.x < 0.0 and size.x <= 0.0:
+				size.x = kept.x
+			if kept.y < 0.0 and size.y <= 0.0:
+				size.y = kept.y
+		return size
 	if s == null or not s.has_meta(META_CANVAS):
 		return Vector2.ZERO
 	if str(s.get_meta(META_CANVAS).get("mode", "")) != "world":

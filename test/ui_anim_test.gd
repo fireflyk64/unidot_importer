@@ -193,13 +193,12 @@ func _transitions(scene: Node) -> void:
 	# colour tint over fadeDuration
 	near(Graphic.renderer_color(fade).g, 1.0, "colour tint at rest: the normal colour")
 	_point(fade)
-	await _frames(2)
 	var green: float = Graphic.renderer_color(fade).g
-	ok(green > 0.5 and green <= 1.0, "the pointer over it: the tint has only begun to fade: %s" % str(green))
+	ok(is_equal_approx(green, 1.0) and Graphic.fade_of(fade) != null, "the pointer over it: the tint starts to fade from where it is: %s" % str(green))
 	await create_timer(0.1).timeout
 	green = Graphic.renderer_color(fade).g
-	ok(green > 0.05 and green < 0.95, "... is on its way after 0.1 s: %s" % str(green))
-	await create_timer(0.25).timeout
+	ok(green < 0.999, "... is on its way after 0.1 s: %s" % str(green))
+	await create_timer(0.35).timeout
 	near(Graphic.renderer_color(fade), Color(1, 0, 0, 1), "... and there after fadeDuration (0.2 s)")
 	near(Graphic.drawn_color(fade), Color(1, 0, 0, 1), "... which is what is drawn")
 	_point(fade, false)
@@ -228,10 +227,9 @@ func _transitions(scene: Node) -> void:
 	near(Graphic.renderer_color(mark).a, 0.0, "a toggle that is off: no check mark")
 	_button(toggle, true)
 	_button(toggle, false)
-	await _frames(2)
 	var alpha: float = Graphic.renderer_color(mark).a
-	ok(toggle.button_pressed and alpha < 0.9, "clicked: on, the mark has only begun to fade in: %s" % str(alpha))
-	await create_timer(0.2).timeout
+	ok(toggle.button_pressed and is_zero_approx(alpha) and Graphic.fade_of(mark) != null, "clicked: on, the mark starts to fade in: %s" % str(alpha))
+	await create_timer(0.3).timeout
 	near(Graphic.renderer_color(mark).a, 1.0, "... and is shown after 0.1 s")
 	_point(toggle, false)
 

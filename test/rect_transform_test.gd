@@ -54,6 +54,7 @@ func _init() -> void:
 	await _nested_canvas()
 	await _screen_canvas()
 	await _plain_holders()
+	await _negative_sizes()
 	_rich_text()
 	await _text_nodes()
 	_graphics()
@@ -233,6 +234,53 @@ func _canvas(pos: Vector3 = Vector3(1, 2, 3), scale: float = 0.01) -> Node3D:
 
 
 ## Unity's defaults (centre anchors, centre pivot) plus the given values.
+## A rect stretched with insets larger than its parent has a negative size. Unity lays its
+## children out against it all the same; a Control cannot be smaller than nothing, so what is
+## below is placed by the size the rect should have.
+func _negative_sizes() -> void:
+	var host := Control.new()
+	host.size = Vector2(200, 100)
+	root.add_child(host)
+	# stretched over 200 x 100 with insets of 70 and 55: 60 x -10, centred
+	var body := Control.new()
+	body.name = "Body"
+	host.add_child(body)
+	_rt(body, {"anchor_min": Vector2(0, 0), "anchor_max": Vector2(1, 1), "size_delta": Vector2(-140, -110)})
+	near(RT.rect_size(body), Vector2(60, -10), "a rect stretched with insets larger than its parent: its size is negative")
+	near(RT.rect(body).position, Vector2(-30, 5), "... its rect starts above where it ends")
+	eq(body.size, Vector2(60, 0), "... while the Control has no height")
+	# a child along the bottom edge (Unity's yMin, which lies above yMax here), 6 high
+	var line: TextureRect = _image(body, "Line", {"anchor_min": Vector2(0, 0), "anchor_max": Vector2(1, 0), "pivot": Vector2(0.5, 0), "size_delta": Vector2(0, 6)})
+	await process_frame
+	near(RT.rect_size(line), Vector2(60, 6), "a child stretched along its bottom edge")
+	near(RT.anchored_position(line), Vector2.ZERO, "... keeps its Unity values")
+	near(RT.size_delta(line), Vector2(0, 6), "... size delta too")
+	# Unity: the body's yMin is at +5 of the host's centre (y up), the line spans +5 .. +11:
+	# in Godot's coordinates of the host (y down, origin top-left) 39 .. 45
+	near(line.get_global_rect().position - host.get_global_rect().position, Vector2(70, 39), "... and is drawn where Unity puts it: its top-left corner")
+	near(line.size, Vector2(60, 6), "... with its size")
+	# a child in the middle of the negative rect, and one stretched over it (negative too)
+	var dot: TextureRect = _image(body, "Dot", {"size_delta": Vector2(4, 4)})
+	var inner := Control.new()
+	inner.name = "Inner"
+	body.add_child(inner)
+	_rt(inner, {"anchor_min": Vector2(0, 0), "anchor_max": Vector2(1, 1), "size_delta": Vector2(-10, 0)})
+	var deep: TextureRect = _image(inner, "Deep", {"anchor_min": Vector2(0, 1), "anchor_max": Vector2(0, 1), "pivot": Vector2(0, 1), "size_delta": Vector2(8, 8)})
+	await process_frame
+	near(dot.get_global_rect().get_center() - host.get_global_rect().position, Vector2(100, 50), "a child anchored to the middle is in the middle")
+	near(RT.rect_size(inner), Vector2(50, -10), "a rect stretched over the negative one is negative as well")
+	# its top-left corner in Unity: x = -25, yMax = yMin + height = 5 - 10 = -5 of the centre
+	near(deep.get_global_rect().position - host.get_global_rect().position, Vector2(75, 55), "... and what is anchored to its top-left corner is drawn there")
+	# the body grows: the size is real again and the children are laid out by Godot
+	RT.set_size_delta(body, Vector2(-140, -60))
+	await process_frame
+	near(RT.rect_size(body), Vector2(60, 40), "the insets shrink: a size a Control can have")
+	near(line.get_global_rect().position - host.get_global_rect().position, Vector2(70, 64), "... and its children follow (the line on its bottom edge)")
+	ok(not (line.get_meta(RT.META_RECT) as Dictionary if line.has_meta(RT.META_RECT) else {}).has("size_delta"), "... by their anchors alone again")
+	host.queue_free()
+	await process_frame
+
+
 func _rt(n: Node, v: Dictionary) -> void:
 	var full: Dictionary = RT._defaults()
 	full.merge(v, true)
@@ -584,6 +632,93 @@ func _text(parent: Node, settings: Dictionary, size: Vector2) -> RichTextLabel:
 	return t
 
 
+## What a TextMeshPro text takes from its assets and from other texts: the outline and underlay
+## of its material, the first visible character, pages, the text it goes on in, sprites.
+func _text_styles(host: Control) -> void:
+	# lengths of the material are in font sizes (here: an outline of 0.0309 and an underlay
+	# offset of 0.0617, what a gradient scale of 10 in an atlas made at 81 points gives for an
+	# outline width and an underlay offset of 0.5)
+	var styled: RichTextLabel = _text(host, {"text": "Styled", "size": 72.0, "outline": {"ratio": 0.030864, "color": Color(0.1, 0.2, 0.9, 1)},
+		"underlay": {"x": 0.061728, "y": 0.061728, "dilate": 0.0, "color": Color(0, 0, 0, 0.5)}}, Vector2(300, 90))
+	eq(styled.get_theme_constant("outline_size"), 2, "the outline of the material at 72: two units")
+	eq(styled.get_theme_color("font_outline_color"), Color(0.1, 0.2, 0.9, 1), "... in its colour")
+	eq(styled.get_theme_constant("shadow_offset_x"), 4, "the underlay is a shadow, offset to the right")
+	eq(styled.get_theme_constant("shadow_offset_y"), 4, "... and down")
+	eq(styled.get_theme_color("font_shadow_color"), Color(0, 0, 0, 0.5), "... in its colour")
+	UiText.set_font_size(styled, 18.0)
+	eq(styled.get_theme_constant("outline_size"), 1, "at 18 the outline is thinner than a unit: one unit")
+	eq(styled.get_theme_constant("shadow_offset_x"), 1, "... and the shadow one unit away")
+	UiText.set_font_size(styled, 4.0)
+	eq(styled.get_theme_constant("outline_size"), 0, "... and too thin to see at 4")
+	var bare: RichTextLabel = _text(host, {"text": "Bare", "size": 20.0}, Vector2(300, 40))
+	ok(not bare.has_theme_constant_override("outline_size") and not bare.has_theme_color_override("font_shadow_color"), "a text without such a material has neither")
+	# the first visible character
+	eq(UiText.to_bbcode("ab<b>cd</b>ef", true, 0, 20.0, true, -1, "", {"skip": 3}), "[b]d[/b]ef", "characters before the first visible one are left out, their tags are not")
+	eq(UiText.to_bbcode("ab<br>cd", true, 0, 20.0, true, 2, "", {"skip": 2}), "\nc", "a break is a character; the limit counts from the first one shown")
+	var late: RichTextLabel = _text(host, {"text": "one two", "size": 20.0, "first": 4}, Vector2(300, 40))
+	eq(late.get_parsed_text(), "two", "firstVisibleCharacter: the text starts there")
+	eq(UiText.text(late), "one two", "... and the string is whole")
+	# pages: the lines that fit the rect (two of 20 in 50) are a page
+	var paged: RichTextLabel = _text(host, {"text": "one<br>two<br>three<br>four<br>five", "size": 20.0, "overflow": 5, "page": 1}, Vector2(200, 50))
+	await process_frame
+	UiText.layout(paged)
+	var page: RichTextLabel = paged.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(page != null, "a paged text higher than its rect is drawn by the child")
+	if page != null:
+		eq(page.get_parsed_text(), "one\ntwo", "Page overflow: the first page is the lines that fit")
+		UiText.update(paged, {"page": 2})
+		page = paged.get_node_or_null(UiText.DRAWER) as RichTextLabel
+		eq(page.get_parsed_text(), "three\nfour", "the second page: the lines after them")
+		near(page.position.y, 0.0, "... drawn from the top of the rect")
+		eq(paged.get_parsed_text(), "one\ntwo\nthree\nfour\nfive", "... while the node keeps the whole text")
+		UiText.update(paged, {"page": 3})
+		eq((paged.get_node_or_null(UiText.DRAWER) as RichTextLabel).get_parsed_text(), "five", "the last page: what is left")
+		UiText.update(paged, {"page": 4})
+		eq((paged.get_node_or_null(UiText.DRAWER) as RichTextLabel).get_parsed_text(), "", "a page the text does not have shows nothing")
+	var one_page: RichTextLabel = _text(host, {"text": "fits", "size": 20.0, "overflow": 5, "page": 2}, Vector2(200, 50))
+	await process_frame
+	UiText.layout(one_page)
+	var none: RichTextLabel = one_page.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(none != null and none.get_parsed_text() == "" and one_page.visible_characters == 0, "the second page of a text that fits is empty")
+	# linked texts: what does not fit goes on in the other one
+	var second: RichTextLabel = _text(host, {"text": "stale", "size": 20.0}, Vector2(200, 50))
+	var first: RichTextLabel = _text(host, {"text": "one<br>two<br>three<br>four<br>five", "size": 20.0, "overflow": 6}, Vector2(200, 50))
+	UiText.update(first, {"linked": first.get_path_to(second)})
+	await process_frame
+	UiText.layout(first)
+	var first_drawer: RichTextLabel = first.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(first_drawer != null and first_drawer.visible_characters == 8, "Linked overflow: the text shows the lines that fit")
+	eq(second.get_parsed_text(), "three\nfour\nfive", "... and the other text goes on where it ends")
+	eq(UiText.text(second), "one<br>two<br>three<br>four<br>five", "... having the whole string")
+	eq(int(second.get_meta(UiText.META).get("first", 0)), 8, "... and its first visible character")
+	UiText.set_text(first, "short")
+	eq(second.get_parsed_text(), "", "a text that fits leaves nothing for the other one")
+	# sprites of a sprite asset (the rects are Unity's: y from the bottom of the sheet, which
+	# is 64 high here)
+	var icons := Resource.new()
+	icons.set_meta(&"unidot_tmp_sprites", {"point": 32.0, "scale": 1.0, "names": {"left": 0, "right": 1},
+		"list": [{"rect": Rect2(0, 0, 32, 32), "width": 32.0, "height": 32.0, "scale": 1.0}, {"rect": Rect2(32, 16, 32, 32), "width": 32.0, "height": 24.0, "scale": 2.0}]})
+	var sheet_path: String = "res://unidot_test_sheet.tres"
+	var sheet := GradientTexture2D.new()
+	sheet.width = 64
+	sheet.height = 64
+	sheet.resource_path = sheet_path   # (a picture in a text is named by its path)
+	var with_sprites: Dictionary = {"sprites": icons, "sprite_sheet": sheet}
+	eq(sheet.get_height(), 64, "(the sheet of the test is 64 high)")
+	eq(UiText.to_bbcode("a<sprite=0>b", true, 0, 16.0, true, -1, "", with_sprites), "a[img width=16 height=16 region=0,32,32,32]" + sheet_path + "[/img]b", "a sprite by its index, scaled with the font size (16 of 32 points)")
+	eq(UiText.to_bbcode("<sprite name=\"right\">", true, 0, 16.0, true, -1, "", with_sprites), "[img width=32 height=24 region=32,16,32,32]" + sheet_path + "[/img]", "by its name; its own scale and metrics")
+	eq(UiText.to_bbcode("<sprite index=1>", true, 0, 32.0, true, -1, "", with_sprites), "[img width=64 height=48 region=32,16,32,32]" + sheet_path + "[/img]", "by index=")
+	eq(UiText.to_bbcode("<sprite=\"Icons\" index=0>", true, 0, 32.0, true, -1, "", with_sprites), "[img width=32 height=32 region=0,32,32,32]" + sheet_path + "[/img]", "with the name of the asset before it")
+	eq(UiText.to_bbcode("<sprite=7>x", true, 0, 16.0, true, -1, "", with_sprites), "x", "a sprite the asset does not have draws nothing")
+	eq(UiText.to_bbcode("<sprite=0>x", true, 0, 16.0), "x", "nor does any sprite without an asset")
+	eq(UiText.visible_length("a<sprite=1>b", true, true), 3, "a sprite is one character")
+	eq(UiText.to_bbcode("a<sprite=0>bc", true, 0, 32.0, true, 2, "…", with_sprites), "a[img width=32 height=32 region=0,32,32,32]" + sheet_path + "[/img]…", "... for a cut as well")
+	var pictured: RichTextLabel = _text(host, {"text": "Pot <sprite=0> it", "size": 32.0, "sprites": icons, "sprite_sheet": sheet}, Vector2(300, 40))
+	ok(pictured.text.contains("[img width=32 height=32 region=0,32,32,32]"), "a text node draws the sprites of its asset: " + pictured.text)
+	var around: String = pictured.get_parsed_text()
+	ok(around.begins_with("Pot ") and around.ends_with(" it") and around.length() == 8, "... each of which is one character of the label: '%s'" % around)
+
+
 ## Text nodes: what is rendered, what a setter changes, auto-sizing.
 func _text_nodes() -> void:
 	var host := Control.new()
@@ -701,6 +836,7 @@ func _text_nodes() -> void:
 	ok(wide.get_node_or_null(UiText.DRAWER) == null, "a line that fits is drawn by the node itself")
 	eq(UiText.visible_length("a<b>bc</b><br>d <unknown>", true, true), 15, "the characters a text shows: tags are not counted, a break is one, an unknown tag is text")
 	eq(UiText.to_bbcode("ab<br>cd", true, 0, 20.0, true, 3, "…"), "ab\n…", "a cut at a line's first character")
+	await _text_styles(host)
 	# a hand-built Label has no Unity settings: the plain properties are used
 	var l := Label.new()
 	host.add_child(l)

@@ -63,6 +63,7 @@ func apply() -> void:
 		get_viewport().gui_snap_controls_to_pixels = false
 	root.scale = Vector2(f, f)
 	root.size = screen / f
+	RT.resized_below(root)   # (rects that this size makes negative)
 	cfg["size"] = root.size
 	cfg["scale_factor"] = f
 	canvas.set_meta(RT.META_CANVAS, cfg)

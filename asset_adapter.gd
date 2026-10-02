@@ -539,6 +539,11 @@ class YamlHandler:
 
 		if main_asset != null:
 			godot_resource = main_asset.create_godot_resource()
+			# (plugins may have something to say about the resource: metadata they read later)
+			if godot_resource != null and godot_resource != pkgasset.parsed_meta:
+				for plugin in pkgasset.parsed_meta.get_enabled_plugins():
+					if plugin.has_method("handle_asset_resource"):
+						plugin.handle_asset_resource(main_asset, godot_resource)
 
 		if get_file_extension_without_early_parse(pkgasset) != "" or get_asset_type(pkgasset) == ASSET_TYPE_ANIM:
 			pkgasset.parsed_asset.assets.clear()
