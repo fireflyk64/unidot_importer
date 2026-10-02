@@ -135,7 +135,26 @@ func _init() -> void:
 	near(RT.drawn_point(knob, Vector2.ZERO), Vector3(10.2 + 0.07 - 0.06, 3.04 + 0.01 + 0.04, 2), "... its top-left corner (60 x 40 at twice its scale)", 0.002)
 	await _component_curves(scene)
 	await _transitions(scene)
+	_sprite_assets(scene)
 	_done()
+
+
+## A Sprite that is an asset of its own (Packed.asset: 32 x 32 in the right half of the sheet,
+## borders 4 / 6 / 8 / 10 for left / bottom / right / top) is the part of its texture it was
+## packed into.
+func _sprite_assets(scene: Node) -> void:
+	var holder: Node = _find(scene, "Mixed")
+	var canvas: Control = RT.root_control(holder) if holder != null else null
+	var packed: TextureRect = canvas.get_node_or_null("Packed") as TextureRect if canvas != null else null
+	var sliced: Control = canvas.get_node_or_null("PackedSliced") as Control if canvas != null else null
+	ok(packed != null and sliced != null, "the Images with the Sprite asset")
+	if packed == null or sliced == null:
+		return
+	var tex: AtlasTexture = packed.texture as AtlasTexture
+	ok(tex != null and tex.region == Rect2(32, 0, 32, 32), "a Sprite asset shows the rect of the texture it was packed into: " + str(tex.region if tex != null else packed.texture))
+	var drawing: Dictionary = Graphic.state(sliced).get("sprite", {})
+	ok(drawing.get("border", []) == [4.0, 10.0, 8.0, 6.0], "... a sliced Image has its border (left, top, right, bottom): " + str(drawing.get("border")))
+	near(float(drawing.get("unit", 0.0)), 2.0, "... at its pixels per unit (50 on a canvas of 100: two units a pixel)")
 
 
 ## The pointer, as the viewport of `c` receives it: moved to the middle of `c` (or off the

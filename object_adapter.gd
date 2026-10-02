@@ -3481,6 +3481,55 @@ class UnidotTexture:
 		return gen_image_layer(imgdata, 0, 0)
 
 
+## A Sprite that is an asset of its own (class 213 in a file, not a rect of a texture's import
+## settings): what an atlas tool or an extracted project leaves. It becomes the part of the
+## texture it was packed into (`m_RD.textureRect`; a sprite that was not packed: `m_Rect`),
+## with its border and pixels per unit in the `unidot_sprite` metadata. A UI Image draws that
+## rect whatever the packing (a sprite that was rotated or packed tightly shows it in Unity
+## too: the UI does not use the sprite's mesh unless told to).
+class UnidotSprite:
+	extends UnidotObject
+
+	func get_godot_type() -> String:
+		return "AtlasTexture"
+
+	func get_godot_extension() -> String:
+		return ".sprite.tres"
+
+	static func _rect(r) -> Rect2:
+		if r is Rect2:
+			return r
+		if r is Dictionary:
+			return Rect2(float(r.get("x", 0)), float(r.get("y", 0)), float(r.get("width", 0)), float(r.get("height", 0)))
+		return Rect2()
+
+	func create_godot_resource() -> Resource:
+		var rd: Dictionary = keys["m_RD"] if keys.get("m_RD") is Dictionary else {}
+		var texture_ref = rd.get("texture")
+		if not (texture_ref is Array) or texture_ref.size() < 4 or texture_ref[1] == 0 or meta.lookup_meta(texture_ref) == null:
+			log_warn("Sprite " + str(keys.get("m_Name", "")) + " has no texture in the project")
+			return null
+		var texture: Texture2D = meta.get_godot_resource(texture_ref, true) as Texture2D
+		if texture == null:
+			return null
+		var rect: Rect2 = _rect(rd.get("textureRect"))
+		if rect.size.x <= 0.0 or rect.size.y <= 0.0:
+			rect = _rect(keys.get("m_Rect"))
+		var sprite := AtlasTexture.new()
+		sprite.atlas = texture
+		# (Unity's rects have their origin at the bottom-left of the texture)
+		if rect.size.x > 0.0 and rect.size.y > 0.0:
+			sprite.region = Rect2(rect.position.x, float(texture.get_height()) - rect.position.y - rect.size.y, rect.size.x, rect.size.y)
+		# Unity's border is left, bottom, right, top; the metadata's left, top, right, bottom
+		var border = keys.get("m_Border")
+		var edges: Array = [0, 0, 0, 0]
+		if border is Quaternion or border is Vector4 or border is Color:
+			var b: Array = [border.r, border.g, border.b, border.a] if border is Color else [border.x, border.y, border.z, border.w]
+			edges = [b[0], b[3], b[2], b[1]]
+		sprite.set_meta(&"unidot_sprite", {"border": edges, "ppu": float(keys.get("m_PixelsToUnits", 100.0))})
+		return sprite
+
+
 class UnidotTexture2D:
 	extends UnidotTexture
 
@@ -8103,7 +8152,7 @@ var _type_dictionary: Dictionary = {
 	"SphereCollider": UnidotSphereCollider,
 	# "SpringJoint": UnidotSpringJoint,
 	# "SpringJoint2D": UnidotSpringJoint2D,
-	# "Sprite": UnidotSprite,
+	"Sprite": UnidotSprite,
 	# "SpriteAtlas": UnidotSpriteAtlas,
 	# "SpriteAtlasDatabase": UnidotSpriteAtlasDatabase,
 	# "SpriteMask": UnidotSpriteMask,

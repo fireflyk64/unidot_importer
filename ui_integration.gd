@@ -1225,6 +1225,12 @@ func _sprite(ref: Array, obj: RefCounted) -> Dictionary:
 	if tex == null:
 		return {}
 	var info: Dictionary = {"texture": tex, "border": [0, 0, 0, 0], "ppu": 100.0}
+	if tex.has_meta(&"unidot_sprite"):
+		# a Sprite that is an asset of its own: it brings its border and pixels per unit
+		var own: Dictionary = tex.get_meta(&"unidot_sprite")
+		info["border"] = own.get("border", [0, 0, 0, 0])
+		info["ppu"] = maxf(float(own.get("ppu", 100.0)), 0.0001)
+		return info
 	var tm = obj.meta.lookup_meta(ref)
 	var ik: Dictionary = tm.importer_keys if tm != null and tm.get("importer_keys") is Dictionary else {}
 	if ik.has("spritePixelsToUnits"):
