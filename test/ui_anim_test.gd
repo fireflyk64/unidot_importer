@@ -11,6 +11,8 @@ extends SceneTree
 ## "On" over 0.25 s.
 
 const RT := preload("../runtime/rect_transform.gd")
+const Graphic := preload("../runtime/ui_graphic.gd")
+const UiText := preload("../runtime/ui_text.gd")
 
 var _checks: int = 0
 var _failed: int = 0
@@ -129,7 +131,99 @@ func _init() -> void:
 	await _frames(2)
 	near(RT.anchored_position(knob), Vector2(70, 10), "the sliding clip at its end")
 	near(RT.drawn_point(knob, Vector2.ZERO), Vector3(10.2 + 0.07 - 0.06, 3.04 + 0.01 + 0.04, 2), "... its top-left corner (60 x 40 at twice its scale)", 0.002)
+	await _component_curves(scene)
 	_done()
+
+
+## The "AnimatedUi" canvas (500 x 300 at Unity (11.4, 3, 2)): the panel "Show" has an Animator
+## whose states play one clip each. Turn: Dial turns 90 degrees about z and grows to twice its
+## scale, the plain Transform "Holder" moves from (-80, 90) to (-40, 70): curves without a class
+## id (m_EulerCurves, m_ScaleCurves, m_PositionCurves). Fade: fields of components. Frames: the
+## sprite of an Image. Each is sampled by hand.
+func _component_curves(scene: Node) -> void:
+	var holder: Node = _find(scene, "AnimatedUi")
+	var canvas: Control = RT.root_control(holder) if holder != null else null
+	var show: Control = canvas.get_node_or_null("Show") as Control if canvas != null else null
+	var player: AnimationPlayer = show.get_node_or_null("AnimationPlayer") as AnimationPlayer if show != null else null
+	var tree: AnimationTree = show.get_node_or_null("AnimationTree") as AnimationTree if show != null else null
+	ok(player != null and tree != null, "the Show panel of the AnimatedUi canvas has its player and tree")
+	if player == null or tree == null:
+		return
+	ok(player.has_animation("Turn") and player.has_animation("Fade") and player.has_animation("Frames"), "its clips: " + str(player.get_animation_list()))
+	var lost: Array = []
+	for clip in player.get_animation_list():
+		var anim: Animation = player.get_animation(clip)
+		for t in range(anim.get_track_count()):
+			var path: NodePath = anim.track_get_path(t)
+			var target: Node = player.get_node(player.root_node).get_node_or_null(NodePath(path.get_concatenated_names()))
+			if target == null or (path.get_subname_count() > 0 and not (String(path.get_subname(0)) in target)):
+				lost.append("%s: %s" % [clip, str(path)])
+	ok(lost.is_empty(), "every track has its node and property: " + str(lost))
+	var dial: Control = show.get_node("Dial")
+	var plain: Control = show.get_node("Holder")
+	var held: Control = plain.get_node("Held")
+	var label: Control = show.get_node("Label")
+	var bar: Control = show.get_node("Bar")
+	var group: Control = show.get_node("Group")
+	var blink: Control = show.get_node("Blink")
+	var hide: Control = show.get_node("Hide")
+	var level: Range = show.get_node("Level")
+	var check: BaseButton = show.get_node("Check")
+	var go: BaseButton = show.get_node("Go")
+	var icon: TextureRect = show.get_node("Icon")
+	await _frames(3)
+	near(RT.local_scale(dial), Vector3.ONE, "at rest nothing has changed: the dial's scale")
+	near(Graphic.drawn_color(blink).a, 1.0, "... Blink is drawn")
+	tree.active = false
+	# rotation, scale and position
+	player.play("Turn")
+	player.pause()
+	player.seek(0.5, true)
+	await _frames(2)
+	near(RT.local_rotation(dial).get_euler().z, deg_to_rad(45.0), "Turn at 0.5 s: the dial is turned 45 degrees about z")
+	near(RT.local_scale(dial), Vector3(1.5, 1.5, 1), "... and scaled by 1.5")
+	near(RT.anchored_position(dial), Vector2(-180, 90), "... where it was (no curve moves it)")
+	near(dial.scale, Vector2(1.5, 1.5), "... the Control shows the scale")
+	near(absf(dial.rotation), deg_to_rad(45.0), "... and the rotation")
+	near(RT.local_position(plain), Vector3(-60, 80, 0), "... the plain Transform is half way")
+	near(RT.drawn_point(held, held.size * 0.5), Vector3(11.4 - 0.06, 3.08, 2), "... and what it holds is drawn there", 0.002)
+	player.seek(1.0, true)
+	await _frames(2)
+	near(RT.local_rotation(dial).get_euler().z, deg_to_rad(90.0), "Turn at its end: 90 degrees")
+	# Unity's z rotation is counter-clockwise: the dial's local +x (right) points up on the canvas
+	near(RT.drawn_point(dial, Vector2(dial.size.x, dial.size.y * 0.5)) - RT.drawn_point(dial, dial.size * 0.5), Vector3(0, 0.06, 0), "... its right edge is above its centre (60 units at twice the scale: 0.06)", 0.002)
+	near(RT.local_position(plain), Vector3(-40, 70, 0), "... the plain Transform has arrived")
+	# fields of components
+	player.play("Fade")
+	player.pause()
+	player.seek(0.5, true)
+	await _frames(2)
+	near(Graphic.color(dial).a, 0.5, "Fade at 0.5 s: the Image's alpha")
+	near(Graphic.color(dial).r, 0.75, "... and red")
+	near(Graphic.color(label).a, 0.75, "... the text's alpha")
+	near(UiText.font_size(label), 30.0, "... its font size")
+	near(float((Graphic.state(bar).get("sprite", {}) as Dictionary).get("amount", -1.0)), 0.5, "... the fill amount")
+	near(group.modulate.a, 0.75, "... the CanvasGroup's alpha fades what is in it")
+	near(level.value, 0.5, "... the Slider's value")
+	player.seek(0.25, true)
+	await _frames(2)
+	ok(Graphic.enabled(blink) and hide.visible and not check.button_pressed and not go.disabled, "Fade at 0.25 s: the switches are as they were")
+	player.seek(0.75, true)
+	await _frames(2)
+	ok(not Graphic.enabled(blink) and is_zero_approx(Graphic.drawn_color(blink).a) and blink.visible, "Fade at 0.75 s: the Image component is disabled (its object is not hidden)")
+	ok(not hide.visible, "... the object whose m_IsActive went to 0 is hidden")
+	ok(check.button_pressed and is_equal_approx(Graphic.drawn_color(check.get_node("Mark")).a, 1.0), "... the Toggle is on and shows its check mark")
+	ok(go.disabled, "... the Button is not interactable")
+	# the sprite of an Image
+	var left: Texture2D = icon.texture
+	player.play("Frames")
+	player.pause()
+	player.seek(0.25, true)
+	await _frames(2)
+	ok(icon.texture is AtlasTexture and (icon.texture as AtlasTexture).region.position.x < 1.0, "Frames at 0.25 s: the first sprite of the sheet: " + str(icon.texture))
+	player.seek(0.75, true)
+	await _frames(2)
+	ok(icon.texture is AtlasTexture and is_equal_approx((icon.texture as AtlasTexture).region.position.x, 32.0) and left != null, "Frames at 0.75 s: the second sprite (its rect starts at 32)")
 
 
 func _done() -> void:

@@ -26,6 +26,7 @@ const unidot_utils_class = preload("./unidot_utils.gd")
 const shaderlab := preload("./shaderlab.gd")
 const rect_transform := preload("./runtime/rect_transform.gd")
 const rect_anim := preload("./runtime/rect_anim.gd")
+const ui_anim := preload("./runtime/ui_anim.gd")
 const ui_integration := preload("./ui_integration.gd")
 
 var unidot_utils = unidot_utils_class.new()
@@ -2504,6 +2505,19 @@ class UnidotAnimationClip:
 				return Quaternion(results[0], -results[1], -results[2], results[3]).normalized()
 			return results
 
+	## A 3D track (position, rotation, scale: curves without a class id) whose object is UI
+	## drives the Node3D helper of the rect (runtime/rect_anim.gd), which hands the values on.
+	func _rect_track_path(node_parent: Node, new_path: NodePath) -> NodePath:
+		if new_path == NodePath() or node_parent == null:
+			return new_path
+		var target: Node = node_parent.get_node_or_null(new_path)
+		if target == null and str(new_path).ends_with("/" + rect_anim.HELPER):
+			return new_path
+		if target == null or not (target is Control or (rect_transform.is_canvas(target) and rect_transform.is_nested(target))):
+			return new_path
+		rect_anim.ensure(target, node_parent.owner if node_parent.owner != null else node_parent, rect_anim)
+		return NodePath(("" if str(new_path) == "." else str(new_path) + "/") + rect_anim.HELPER)
+
 	func adapt_track_nodepaths_for_node(animator: RefCounted, node_parent: Node, clip: Animation) -> Array:
 		var resolved_to_default_paths: Dictionary = clip.get_meta("resolved_to_default_paths", {})
 		var new_track_names: Array = []
@@ -2615,6 +2629,11 @@ class UnidotAnimationClip:
 				Animation.TYPE_VALUE:
 					new_path = resolve_gameobject_component_path(animator, path, classID)
 					if new_path != NodePath():
+						if classID == 1 and attr == "m_IsActive" and node_parent != null and node_parent.get_node_or_null(new_path) != null:
+							# an object the clip activates: plugins may want to know it
+							for plugin in meta.get_enabled_plugins():
+								if plugin.has_method("handle_animated_active"):
+									plugin.handle_animated_active(node_parent.get_node(new_path))
 						if classID == 224 and rect_anim.curve_property(attr) != "":
 							# an animated RectTransform: the track drives the helper of its Control
 							var rect_node: Node = node_parent.get_node_or_null(new_path) if node_parent != null else null
@@ -2622,25 +2641,41 @@ class UnidotAnimationClip:
 								var rect_owner: Node = node_parent.owner if node_parent.owner != null else node_parent
 								rect_anim.ensure(rect_node, rect_owner, rect_anim)
 							new_path = NodePath(str(new_path) + "/" + rect_anim.HELPER)
+						elif attr.begins_with("ui:"):
+							# an animated field of a UI component: the helper of its object
+							var ui_node: Node = node_parent.get_node_or_null(new_path) if node_parent != null else null
+							if ui_node != null:
+								ui_anim.ensure(ui_node, node_parent.owner if node_parent.owner != null else node_parent, ui_anim)
+							new_path = NodePath(str(new_path) + "/" + ui_anim.HELPER)
+							var sprites: RefCounted = _sprite_plugin() if attr == "ui:sprite" else null
+							for key in range(clip.track_get_key_count(track_idx) if sprites != null else 0):
+								# (references kept by the clip's import: the sprites exist by now)
+								var sprite_ref = clip.track_get_key_value(track_idx, key)
+								if sprite_ref is Array:
+									clip.track_set_key_value(track_idx, key, sprites.animation_sprite(sprite_ref, self))
 						new_path = NodePath(str(new_path) + ":" + str(resolved_subpath))
 					log_debug("Adapt TYPE_VALUE track " + str(path) + " to " + str(new_path))
 					new_resolved_key = "V" + str(new_path)
 				Animation.TYPE_ROTATION_3D:
 					classID = 4
-					new_path = resolve_gameobject_component_path(animator, path, classID)
+					new_path = _rect_track_path(node_parent, resolve_gameobject_component_path(animator, path, classID))
 					log_debug("Adapt TYPE_ROTATION_3D track " + str(path) + " to " + str(new_path))
 					new_resolved_key = "T" + str(new_path)
 				Animation.TYPE_SCALE_3D:
 					classID = 4
-					new_path = resolve_gameobject_component_path(animator, path, classID)
+					new_path = _rect_track_path(node_parent, resolve_gameobject_component_path(animator, path, classID))
 					log_debug("Adapt TYPE_SCALE_3D track " + str(path) + " to " + str(new_path))
 					new_resolved_key = "T" + str(new_path)
 				Animation.TYPE_POSITION_3D:
 					classID = 4
 					new_path = resolve_gameobject_component_path(animator, path, classID)
+					var position_path: NodePath = _rect_track_path(node_parent, new_path)
+					var on_rect: bool = position_path != new_path
+					new_path = position_path
 					log_debug("Adapt TYPE_POSITION_3D track " + str(path) + " to " + str(new_path))
 					new_resolved_key = "T" + str(new_path)
-					var resolved_node: Node3D = node_parent.get_node_or_null(new_path)
+					# (a rect takes the values as they are: no rotation delta of an imported model)
+					var resolved_node: Node3D = (node_parent.get_node_or_null(new_path) as Node3D) if not on_rect else null
 					log_debug(str(node_parent.name) + ": " + str(resolved_node))
 					if resolved_node != null:
 						var animator_go: UnidotGameObject = animator.gameObject
@@ -2683,6 +2718,13 @@ class UnidotAnimationClip:
 		if identical == len(new_track_names):
 			return []
 		return new_track_names
+
+	## The importer plugin that turns a sprite reference into what an Image shows.
+	func _sprite_plugin() -> RefCounted:
+		for plugin in meta.get_enabled_plugins():
+			if plugin.has_method("animation_sprite"):
+				return plugin
+		return null
 
 	func adapt_animation_clip_at_node(animator: RefCounted, node_parent: Node, clip: Animation):
 		var generated_track_nodepaths: Array = adapt_track_nodepaths_for_node(animator, node_parent, clip)
@@ -2846,6 +2888,19 @@ class UnidotAnimationClip:
 							var gdscriptweird: Node = null
 							target_node = gdscriptweird
 					var converted_property: String = ""
+					if classID == 114 or classID == 225:
+						# A field of a UI component (the colour of an Image, the alpha of a
+						# CanvasGroup): the track drives a helper below the object's node whose
+						# setters are those of scripts (runtime/ui_anim.gd), or a property of the
+						# Control itself. The object is found like a Transform.
+						var script_ref = track.get("script")
+						var ui_kind: String = "CanvasGroup" if classID == 225 else str(ui_integration.UI_COMPONENTS.get(str(script_ref[2]) if script_ref is Array and script_ref.size() > 2 else "", ""))
+						var ui_property: String = ui_anim.curve_property(ui_kind, attr)
+						if not ui_property.is_empty():
+							classID = 4
+							attr = ui_property
+							nodepath = NodePath(str(resolve_gameobject_component_path(animator, path, classID)))
+							converted_property = ui_property.substr(ui_property.find(":") + 1)
 					if classID == 224:
 						# A value of a RectTransform: the track drives a helper below the Control,
 						# whose properties are Unity's (runtime/rect_anim.gd; the helper's name
@@ -3213,6 +3268,20 @@ class UnidotAnimationClip:
 				continue
 			for keyframe in track_curve["m_Curve"]:
 				max_ts = maxf(max_ts, keyframe["time"])
+			if str(track.get("attribute", "")) == "m_Sprite":
+				# The sprite of an Image, switched at each key: a value track on the helper of
+				# the object (runtime/ui_anim.gd), which sets it as a script would. The keys hold
+				# the references until the clip is fitted to an Animator (textures are imported
+				# in the same stage as clips: they may not exist yet).
+				if _sprite_plugin() != null:
+					var sprite_path = NodePath(str(resolve_gameobject_component_path(animator, path, 4)) + ":sprite")
+					var sprite_track: int = anim.add_track(Animation.TYPE_VALUE)
+					resolved_to_default["V" + str(sprite_path)] = [path, "ui:sprite", 4]
+					anim.track_set_path(sprite_track, sprite_path)
+					anim.value_track_set_update_mode(sprite_track, Animation.UPDATE_DISCRETE)
+					for keyframe in track_curve["m_Curve"]:
+						anim.track_insert_key(sprite_track, float(keyframe["time"]), keyframe.get("value"))
+					continue
 			log_warn("PPtr curves (material swaps) are not yet implemented")
 			# TYPE_VALUE track should mostly work for this.
 			# This is mostly only used for material overrides.

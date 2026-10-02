@@ -2,7 +2,7 @@
 # Copyright (c) 2021-present Lyuma <xn.lyuma@gmail.com> and contributors
 # SPDX-License-Identifier: MIT
 @tool
-extends Node
+extends Node3D
 ## The RectTransform of the Control this node is a child of, as animation tracks see it (helper
 ## child "UnidotRect", added by the importer to the controls an Animator animates).
 ##
@@ -11,6 +11,12 @@ extends Node
 ## from them together (runtime/rect_transform.gd). The tracks of a converted clip therefore point
 ## here ("Knob/UnidotRect:anchored_position:x"), and every value set goes through the functions
 ## that the importer and scripts use, so an animated rect is laid out like any other.
+##
+## Rotation, scale and position curves (m_EulerCurves, m_RotationCurves, m_ScaleCurves,
+## m_PositionCurves) carry no class id and are converted as 3D tracks, which only a Node3D can
+## take: this node is one, and what a track sets on it (in Godot's space, as for any Node3D) is
+## handed to the rect as its local rotation, scale and position. Only what a track changed is
+## handed on, so a clip that turns a rect does not move it.
 
 const RT := preload("./rect_transform.gd")
 const HELPER := "UnidotRect"
@@ -119,12 +125,60 @@ static func unity_euler(q: Quaternion) -> Vector3:
 	return Vector3(rad_to_deg(e.x), rad_to_deg(e.y), rad_to_deg(e.z))
 
 
+# ---- what 3D tracks set ------------------------------------------------------------------------
+
+var _seen_position: Vector3 = Vector3.ZERO
+var _seen_rotation: Quaternion = Quaternion.IDENTITY
+var _seen_scale: Vector3 = Vector3.ONE
+var _syncing: bool = false
+
+
+func _ready() -> void:
+	sync_from_host()
+	set_notify_local_transform(true)
+
+
+## Take the rect's values as this node's transform (the base 3D tracks blend from).
+func sync_from_host() -> void:
+	var h: Node = _host()
+	if h == null:
+		return
+	_syncing = true
+	var lp: Vector3 = RT.local_position(h)
+	var q: Quaternion = RT.local_rotation(h)
+	position = Vector3(-lp.x, lp.y, lp.z)
+	quaternion = Quaternion(q.x, -q.y, -q.z, q.w).normalized()
+	scale = RT._safe_scale(RT.local_scale(h))
+	_seen_position = position
+	_seen_rotation = quaternion
+	_seen_scale = scale
+	_syncing = false
+
+
+func _notification(what: int) -> void:
+	if what != NOTIFICATION_LOCAL_TRANSFORM_CHANGED or _syncing:
+		return
+	var h: Node = _host()
+	if h == null:
+		return
+	if not position.is_equal_approx(_seen_position):
+		_seen_position = position
+		RT.set_local_position(h, Vector3(-position.x, position.y, position.z))
+	var q: Quaternion = quaternion
+	if not q.is_equal_approx(_seen_rotation):
+		_seen_rotation = q
+		RT.set_local_rotation(h, Quaternion(q.x, -q.y, -q.z, q.w))
+	if not scale.is_equal_approx(_seen_scale):
+		_seen_scale = scale
+		RT.set_local_scale(h, scale)
+
+
 ## Give `target` the helper (the importer, for the rects an Animator animates).
 static func ensure(target: Node, owner: Node, script: Script) -> Node:
 	var found: Node = target.get_node_or_null(HELPER)
 	if found != null:
 		return found
-	var helper := Node.new()
+	var helper := Node3D.new()
 	helper.name = HELPER
 	helper.set_meta(RT.META_HELPER, true)
 	helper.set_script(script)

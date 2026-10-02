@@ -935,6 +935,14 @@ func _identify_component(guid: String, keys: Dictionary, file_id: int = 0) -> St
 	return ""
 
 
+## An object whose m_IsActive an animation clip drives (hook of the clip's fitting to its
+## Animator): the track sets `visible`; udon_runtime watches the nodes of this group and makes
+## of it what SetActive does (activeSelf, OnEnable / OnDisable).
+func handle_animated_active(node: Node) -> void:
+	if not node.is_in_group(&"udon_animated_active"):
+		node.add_to_group(&"udon_animated_active", true)
+
+
 ## Unity's Animations constraints (hook of object_adapter's constraint classes). udon_runtime
 ## solves them (U.solve_constraints, the store scripts reach through PositionConstraint ...); the
 ## settings go to the node's `udon_constraint` metadata under the names of the script API:

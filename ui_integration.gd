@@ -1021,6 +1021,19 @@ func _sprite(ref: Array, obj: RefCounted) -> Dictionary:
 	return info
 
 
+## The texture of a key of a clip's sprite curve (`m_Sprite`), with the sprite's border on it.
+func animation_sprite(ref, obj: RefCounted) -> Texture2D:
+	if not (ref is Array):
+		return null
+	var info: Dictionary = _sprite(ref, obj)
+	var tex: Texture2D = info.get("texture") as Texture2D
+	if tex != null and info.get("border", [0, 0, 0, 0]) != [0, 0, 0, 0]:
+		# (a copy: the border belongs to this sprite, not to its texture)
+		tex = tex.duplicate()
+		tex.set_meta(&"unidot_sprite", {"border": info["border"]})
+	return tex
+
+
 ## The pixels per unit of the canvas `ctl` is on (CanvasScaler.referencePixelsPerUnit).
 func _reference_ppu(ctl: Node) -> float:
 	var cur: Node = ctl
