@@ -5,7 +5,7 @@ extends SceneTree
 ## the UI draws can be looked at without finding a camera position), and checks the rendering
 ## against the controls' transforms:
 ##   godot --path <project> -s addons/unidot_importer/test/ui_shots.gd -- \
-##         --scene res://X.tscn --out <dir> [--frames 10] [--only <canvas name>] [--check 1] [--static 1] [--all 1]
+##         --scene res://X.tscn --out <dir> [--frames 10] [--only <canvas name>] [--check 1] [--static 1] [--all 1|2]
 ## Needs a display (the headless renderer draws nothing).
 ##
 ## --check 1: the rendered pixels must show what the transforms put there. Positions computed
@@ -22,7 +22,8 @@ extends SceneTree
 ## compared, but a text that is not drawn, or drawn elsewhere, is reported.
 ## --static 1: scripts that are not unidot's own are removed first (the scene as imported).
 ## --all 1: every UI object is made visible first (menus that a script shows later are rendered
-## and checked too; they may overlap).
+## and checked too; they may overlap). --all 2: every object of the scene (canvases below
+## objects that are inactive until something happens: a vehicle's displays).
 
 const RT := preload("../runtime/rect_transform.gd")
 const Sprite := preload("../runtime/ui_sprite.gd")
@@ -45,8 +46,8 @@ func _init() -> void:
 	var scene: Node = ps.instantiate()
 	if str(args.get("static", "0")) == "1":
 		_strip_scripts(scene)
-	if str(args.get("all", "0")) == "1":
-		_show_all(scene, false)
+	if str(args.get("all", "0")) in ["1", "2"]:
+		_show_all(scene, str(args["all"]) == "2")
 	root.add_child(scene)
 	for _f in range(int(args.get("frames", 10))):
 		await process_frame
@@ -81,7 +82,8 @@ func _init() -> void:
 		for p in problems.slice(0, 40):
 			print("  MISDRAWN " + str(p))
 		print("[ui_shots] pixel check: %d points on %d of %d graphics (%d of them blends), %d of %d texts, %d not drawn where the transforms put them" % [points, graphics_checked, graphics_seen, translucent, texts_checked, texts_seen, problems.size()])
-	quit(1 if check and (not problems.is_empty() or points == 0) else 0)
+	# (nothing compared at all is a failure too: a canvas of texts alone has no points)
+	quit(1 if check and (not problems.is_empty() or (points == 0 and texts_checked == 0)) else 0)
 
 
 func _show_all(n: Node, in_ui: bool) -> void:
