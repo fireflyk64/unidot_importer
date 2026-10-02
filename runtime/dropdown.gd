@@ -194,6 +194,8 @@ func show() -> void:
 	blocker.name = BLOCKER
 	blocker.set_meta(RT.META_HELPER, true)
 	blocker.mouse_filter = Control.MOUSE_FILTER_STOP
+	# (Unity's blocker is an invisible Image: a pointer does not pass through it)
+	blocker.set_meta(Graphic.META, {"color": Color(1, 1, 1, 0), "raycast": true})
 	canvas.add_child(blocker)
 	blocker.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	blocker.gui_input.connect(_on_blocker.bind(blocker))

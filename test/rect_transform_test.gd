@@ -57,6 +57,7 @@ func _init() -> void:
 	await _plain_holders()
 	await _negative_sizes()
 	await _frames_3d()
+	await _raycast_targets()
 	_rich_text()
 	await _text_nodes()
 	_graphics()
@@ -1188,6 +1189,47 @@ func _selectable_transitions() -> void:
 	Graphic.fade_of(mark).custom_step(0.05)
 	eq(Graphic.renderer_color(mark).a, 1.0, "... shown after 0.1 s")
 	host.queue_free()
+	await process_frame
+
+
+## Graphic.raycastTarget: what a pointer finds on a canvas (Graphic.raycast_hit).
+func _raycast_targets() -> void:
+	var croot := Control.new()
+	croot.size = Vector2(400, 200)
+	root.add_child(croot)
+	var solid: TextureRect = _image(croot, "Solid", {"anchored_position": Vector2(-150, 0), "size_delta": Vector2(60, 60)})
+	Graphic.update(solid, {"color": Color(1, 1, 1, 0)})
+	var ghost: TextureRect = _image(croot, "Ghost", {"anchored_position": Vector2(-50, 0), "size_delta": Vector2(60, 60)})
+	Graphic.update(ghost, {"raycast": false})
+	var off: TextureRect = _image(croot, "Off", {"anchored_position": Vector2(50, 0), "size_delta": Vector2(60, 60)})
+	Graphic.update(off, {"enabled": false})
+	var group := Control.new()
+	croot.add_child(group)
+	_rt(group, {"anchored_position": Vector2(150, 0), "size_delta": Vector2(60, 60)})
+	var grouped: TextureRect = _image(group, "Grouped", {"anchor_min": Vector2.ZERO, "anchor_max": Vector2.ONE, "size_delta": Vector2.ZERO})
+	Graphic.update(grouped, {})
+	await process_frame
+	# (Godot coordinates of the canvas: x right, y down, the canvas 400 x 200)
+	ok(Graphic.raycast_hit(croot, Vector2(50, 100)), "an Image takes the pointer, even one that draws nothing (alpha 0)")
+	ok(not Graphic.raycast_hit(croot, Vector2(150, 100)), "an Image that is no raycast target lets it through")
+	ok(not Graphic.raycast_hit(croot, Vector2(250, 100)), "... and so does a disabled one")
+	ok(Graphic.raycast_hit(croot, Vector2(350, 100)), "an Image below a group that blocks raycasts takes it")
+	UiGroup.update(group, {"blocksRaycasts": false})
+	ok(not Graphic.raycast_hit(croot, Vector2(350, 100)), "... and not below one that does not")
+	ok(not Graphic.raycast_hit(croot, Vector2(200, 20)), "where there is no graphic there is nothing to hit (the canvas itself has none)")
+	# a mask cuts what is outside it
+	var mask := Control.new()
+	mask.clip_contents = true
+	croot.add_child(mask)
+	_rt(mask, {"anchored_position": Vector2(0, 70), "size_delta": Vector2(40, 40)})
+	var wide: TextureRect = _image(mask, "Wide", {"size_delta": Vector2(200, 20)})
+	Graphic.update(wide, {})
+	await process_frame
+	ok(Graphic.raycast_hit(croot, Vector2(200, 30)), "a graphic inside its mask takes the pointer")
+	ok(not Graphic.raycast_hit(croot, Vector2(260, 30)), "... the part the mask cuts away does not")
+	solid.visible = false
+	ok(not Graphic.raycast_hit(croot, Vector2(50, 100)), "an inactive object takes nothing")
+	croot.queue_free()
 	await process_frame
 
 

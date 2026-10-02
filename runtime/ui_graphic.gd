@@ -12,6 +12,7 @@ extends RefCounted
 ## `unidot_graphic` metadata and applied here, by the importer and by anything that changes them
 ## later.
 ##   {color: Color, renderer: Color, enabled: bool,
+##    raycast: bool (Graphic.raycastTarget: the pointer does not pass through it),
 ##    hidden: bool (drawn by something else or not at all: a Mask that does not show its graphic,
 ##    the text objects of an input field),
 ##    texture: Texture2D (the sprite of an Image that is the background of a widget),
@@ -25,7 +26,7 @@ const _BOXES := ["normal", "hover", "pressed", "disabled", "hover_pressed", "pan
 
 
 static func state(ctl: Node) -> Dictionary:
-	var s: Dictionary = {"color": Color.WHITE, "renderer": Color.WHITE, "enabled": true, "hidden": false}
+	var s: Dictionary = {"color": Color.WHITE, "renderer": Color.WHITE, "enabled": true, "hidden": false, "raycast": true}
 	if ctl == null:
 		return s
 	if ctl.has_meta(META):
@@ -89,6 +90,37 @@ static func set_renderer_alpha(ctl: Node, a: float) -> void:
 	if not has_graphic(ctl) or not is_equal_approx(r.a, a):
 		r.a = a
 		update(ctl, {"renderer": r})
+
+
+## Unity's GraphicRaycaster, as far as "is something there": is a Graphic that takes raycasts
+## under the point `at` (in the coordinates of the canvas's viewport) at or below `c`? A
+## graphic counts whatever it draws (an invisible Image blocks); a disabled one, one that is
+## no raycast target or lies below a CanvasGroup that does not block raycasts does not, nor
+## does what a mask clips away. A pointer that finds nothing goes on to what is behind the
+## canvas.
+static func raycast_hit(c: Control, at: Vector2, passes: bool = false) -> bool:
+	if c == null or not c.visible:
+		return false
+	if c.has_meta(&"unidot_canvas_group"):
+		var group: Dictionary = c.get_meta(&"unidot_canvas_group")
+		if bool(group.get("ignoreParentGroups", false)):
+			passes = false
+		if not bool(group.get("blocksRaycasts", true)):
+			passes = true
+	var xf: Transform2D = c.get_global_transform()
+	var inside: bool = absf(xf.determinant()) > 1e-12 and Rect2(Vector2.ZERO, c.size).has_point(xf.affine_inverse() * at)
+	if c.clip_contents and not inside:
+		return false
+	for child in c.get_children():
+		if child is Control and raycast_hit(child, at, passes):
+			return true
+	if passes or not inside:
+		return false
+	if has_graphic(c):
+		var s: Dictionary = state(c)
+		return bool(s["enabled"]) and bool(s.get("raycast", true))
+	# (a widget without a Unity graphic of its own: a hand-built scene)
+	return c.mouse_filter == Control.MOUSE_FILTER_STOP and (c is BaseButton or c is Range or c is LineEdit)
 
 
 const META_FADE := &"unidot_fade"

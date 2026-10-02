@@ -913,6 +913,14 @@ func configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: 
 	hosted[obj.fileID] = kind
 	ctl.set_meta(META_COMPONENTS, hosted)
 	var keys: Dictionary = obj.keys
+	_configure_component(kind, obj, state, ctl)
+	# Graphic.raycastTarget: a graphic that is none lets the pointer through to what is behind
+	if kind in ["Image", "RawImage", "Text", "TextMeshProUGUI"] and keys.has("m_RaycastTarget") and _to_int(keys["m_RaycastTarget"]) == 0:
+		Graphic.update(ctl, {"raycast": false})
+
+
+func _configure_component(kind: String, obj: RefCounted, state: RefCounted, ctl: Control) -> void:
+	var keys: Dictionary = obj.keys
 	match kind:
 		"Image", "RawImage":
 			# colour, CanvasRenderer colour and enabled are applied by runtime/ui_graphic.gd
