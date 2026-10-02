@@ -664,6 +664,7 @@ func _rich_text() -> void:
 func _text(parent: Node, settings: Dictionary, size: Vector2) -> RichTextLabel:
 	var t := RichTextLabel.new()
 	t.name = "Text"
+	t.autowrap_mode = TextServer.AUTOWRAP_OFF   # (as the importer makes it: a label that wraps is at least 1 wide)
 	t.size = size
 	UiText.set_fonts(t)
 	var s: Dictionary = {"tmp": true}
@@ -672,6 +673,136 @@ func _text(parent: Node, settings: Dictionary, size: Vector2) -> RichTextLabel:
 	parent.add_child(t)
 	UiText.render(t)
 	return t
+
+
+## TextMeshPro's margins (the text is laid out in the rect without them) and the line spacing
+## of both kinds of text.
+func _text_margins(host: Control) -> void:
+	var words: String = "one two three four five six seven"
+	var m: RichTextLabel = _text(host, {"text": words, "size": 20.0, "margin": [20.0, 6.0, 60.0, 4.0]}, Vector2(200, 100))
+	near(UiText.area(m, UiText.settings(m)), Rect2(20, 6, 120, 90), "margins take from the rect: the text area")
+	await process_frame
+	UiText.layout(m)
+	var drawer: RichTextLabel = m.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(drawer != null and m.visible_characters == 0, "a text with margins is drawn by the child")
+	if drawer != null:
+		var content: float = float(drawer.get_content_height())
+		near(drawer.position, Vector2(20, 6), "... which starts at the left and top margins")
+		near(drawer.size, Vector2(120, content), "... as wide as the area, as high as the text")
+		ok(drawer.get_line_count() >= 3 and float(drawer.get_content_width()) <= 120.5, "... the text wrapped at the area's width: %d lines, %d wide" % [drawer.get_line_count(), drawer.get_content_width()])
+		eq(drawer.get_parsed_text(), words, "... the whole text")
+		m.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		UiText.layout(m)
+		near(drawer.position.y, 6.0 + (90.0 - content) * 0.5, "middle alignment: centred between the top and bottom margins")
+		m.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+		UiText.layout(m)
+		near(drawer.position.y, 6.0 + 90.0 - content, "bottom alignment: on the bottom margin")
+		near(UiText.preferred_size(m, 1), content + 10.0, "the preferred height: the text and the margins")
+		# an area lower than the text: the lines that fit it are shown (Truncate)
+		m.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+		UiText.update(m, {"overflow": 3, "margin": [20.0, 6.0, 60.0, 44.0]})
+		drawer = m.get_node_or_null(UiText.DRAWER) as RichTextLabel
+		var two: float = drawer.get_line_offset(2)
+		ok(two <= 50.5 and content > 50.5 and drawer.visible_characters > 0 and drawer.visible_characters < words.length(), "a truncated text shows the lines that fit between its margins: %d characters" % drawer.get_visible_characters())
+	UiText.update(m, {"margin": [0.0, 0.0, 0.0, 0.0], "overflow": 0})
+	ok(m.get_node_or_null(UiText.DRAWER) == null and m.visible_characters == -1, "without margins the node draws its text itself again")
+	# a negative margin gives room beyond the rect
+	var out: RichTextLabel = _text(host, {"text": "A line longer than its rect", "size": 20.0, "margin": [0.0, 0.0, -300.0, 0.0]}, Vector2(100, 30))
+	await process_frame
+	UiText.layout(out)
+	var out_drawer: RichTextLabel = out.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(out_drawer != null and is_equal_approx(out_drawer.size.x, 400.0) and out_drawer.get_line_count() == 1, "a negative margin: the line has room beyond the rect and is not wrapped")
+	# a column narrower than a letter pair: one letter per line, centred on the rect
+	# (vrcbce's labels beside its power and tilt bars)
+	var column: RichTextLabel = _text(host, {"text": "SHOT", "size": 20.0, "margin": [0.0, 0.0, 180.0, 0.0], "line": -25.0}, Vector2(200, 30))
+	column.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	column.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	await process_frame
+	UiText.layout(column)
+	var col_drawer: RichTextLabel = column.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(col_drawer != null and col_drawer.get_line_count() == 4, "a column of 20: one letter per line: %d lines" % (col_drawer.get_line_count() if col_drawer != null else -1))
+	if col_drawer != null:
+		var high: float = float(col_drawer.get_content_height())
+		near(col_drawer.position, Vector2(0.0, (30.0 - high) * 0.5), "... at the left of the rect, centred on its height")
+		eq(col_drawer.get_theme_constant("line_separation"), -5, "TextMeshPro's line spacing: hundredths of the font size (-25 at 20: 5 less)")
+		near(col_drawer.get_line_offset(1) - col_drawer.get_line_offset(0), column.get_theme_font("normal_font").get_height(20) - 5.0, "... between the lines", 0.51)
+	# an auto-sized text fits its area
+	var fitted: RichTextLabel = _text(host, {"text": "Fit me", "size": 60.0, "auto": true, "min": 6.0, "max": 60.0, "wrap": false, "margin": [0.0, 0.0, 140.0, 0.0]}, Vector2(200, 80))
+	await process_frame
+	UiText.layout(fitted)
+	var fit_drawer: RichTextLabel = fitted.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(fit_drawer != null and float(fit_drawer.get_content_width()) <= 60.5 and fitted.get_theme_font_size("normal_font_size") < 30, "an auto-sized text fits the rect without the margins: size %d, %d wide" % [fitted.get_theme_font_size("normal_font_size"), fit_drawer.get_content_width() if fit_drawer != null else -1])
+	# uGUI's line spacing is a factor of the line height
+	var plain: RichTextLabel = _text(host, {"text": "one\ntwo", "tmp": false, "size": 20.0}, Vector2(200, 100))
+	var spaced: RichTextLabel = _text(host, {"text": "one\ntwo", "tmp": false, "size": 20.0, "line_scale": 1.5}, Vector2(200, 100))
+	await process_frame
+	var natural: float = plain.get_line_offset(1) - plain.get_line_offset(0)
+	near(spaced.get_line_offset(1) - spaced.get_line_offset(0), natural * 1.5, "uGUI's line spacing 1.5: lines one and a half line heights apart (%.1f)" % natural, 0.51)
+	UiText.update(spaced, {"line_scale": 1.0})
+	near(spaced.get_line_offset(1) - spaced.get_line_offset(0), natural, "... and back to 1", 0.01)
+
+
+## A text smaller than a font can be (a canvas whose units are metres: font sizes like 0.05):
+## laid out at a size a font has by a child that is scaled down to Unity's size.
+func _text_small(host: Control) -> void:
+	var tiny: RichTextLabel = _text(host, {"text": "one two three", "size": 0.05}, Vector2(0.2, 0.3))
+	near(UiText.raster(UiText.settings(tiny)), 640.0, "a text of 0.05 is laid out 640 times larger (at 32)")
+	near(UiText.raster({"size": 20.0, "max": 72.0}), 1.0, "a text of 20 is drawn as it is")
+	eq(tiny.visible_characters, 0, "the node of a small text draws no glyphs")
+	await process_frame
+	UiText.layout(tiny)
+	var drawer: RichTextLabel = tiny.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(drawer != null, "a small text is drawn by the child")
+	if drawer != null:
+		eq(drawer.get_theme_font_size("normal_font_size"), 32, "... at a font size of 32")
+		near(drawer.scale, Vector2(0.05 / 32.0, 0.05 / 32.0), "... scaled down to 0.05", 1e-7)
+		near(drawer.size.x * drawer.scale.x, 0.2, "... as wide as the rect", 1e-5)
+		ok(drawer.get_line_count() >= 2 and float(drawer.get_content_width()) <= 128.5, "... wrapped at the rect's width: %d lines" % drawer.get_line_count())
+		near(UiText.drawn_font_size(tiny), 0.05, "the size the text is drawn at is Unity's", 1e-6)
+		near(UiText.preferred_size(tiny, 1), float(drawer.get_content_height()) * 0.05 / 32.0, "the preferred height is in the rect's units", 1e-5)
+		ok(UiText.preferred_size(tiny, 0) > 0.2 and UiText.preferred_size(tiny, 0) < 0.5, "... and the preferred width: %.3f" % UiText.preferred_size(tiny, 0))
+		eq(drawer.get_parsed_text(), "one two three", "... the whole text")
+	# sizes inside the text are Unity's too
+	UiText.set_text(tiny, "<size=0.1>big</size> small <size=50%>half</size>")
+	drawer = tiny.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(drawer != null and drawer.text.contains("[font_size=64]big") and drawer.text.contains("[font_size=16]half"), "a size tag of 0.1 in a text of 0.05: twice the size: " + (drawer.text if drawer != null else ""))
+	# middle alignment in the rect, in the rect's units
+	UiText.set_text(tiny, "one")
+	tiny.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	UiText.layout(tiny)
+	drawer = tiny.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	if drawer != null:
+		var high: float = float(drawer.get_content_height()) * drawer.scale.y
+		near(drawer.position.y, (0.3 - high) * 0.5, "a small text is centred in its rect", 1e-5)
+	# auto-sizing between sizes below 1
+	var fitted: RichTextLabel = _text(host, {"text": "Fit me", "size": 0.5, "auto": true, "min": 0.01, "max": 0.5, "wrap": false}, Vector2(0.3, 0.4))
+	await process_frame
+	UiText.layout(fitted)
+	var fit_drawer: RichTextLabel = fitted.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	var drawn: float = UiText.drawn_font_size(fitted)
+	ok(fit_drawer != null and drawn > 0.05 and drawn < 0.2, "an auto-sized small text finds its size between 0.01 and 0.5: %.4f" % drawn)
+	ok(fit_drawer != null and fit_drawer.get_theme_font_size("normal_font_size") == 32 and is_equal_approx(fit_drawer.scale.x, drawn / 32.0), "... and is laid out at 32 for that size")
+	if fit_drawer != null:
+		ok(float(fit_drawer.get_content_width()) * fit_drawer.scale.x <= 0.3 + 0.01, "... at which it fits the rect: %.3f wide" % (float(fit_drawer.get_content_width()) * fit_drawer.scale.x))
+	# maxVisibleCharacters / maxVisibleLines limit what the child draws, and what the node draws
+	UiText.update(tiny, {"text": "one two three", "visible": 5})
+	drawer = tiny.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(drawer != null and drawer.visible_characters == 5 and tiny.visible_characters == 0, "maxVisibleCharacters of a text its child draws")
+	UiText.update(tiny, {"visible": -1, "lines": 1})
+	drawer = tiny.get_node_or_null(UiText.DRAWER) as RichTextLabel
+	ok(drawer != null and drawer.get_line_count() >= 2 and drawer.visible_characters == UiText._line_start(drawer, 1), "maxVisibleLines: the characters of the first line: %d" % (drawer.visible_characters if drawer != null else -9))
+	UiText.update(tiny, {"lines": -1})
+	var plain_text: RichTextLabel = _text(host, {"text": "one two three", "size": 20.0}, Vector2(300, 40))
+	await process_frame
+	UiText.update(plain_text, {"visible": 7})
+	eq(plain_text.visible_characters, 7, "maxVisibleCharacters of a text its node draws")
+	UiText.update(plain_text, {"visible": -1})
+	eq(plain_text.visible_characters, -1, "... and all of them again")
+	# a text that grows to an ordinary size is drawn by the node again
+	UiText.update(tiny, {"size": 20.0})
+	tiny.size = Vector2(200, 100)
+	UiText.layout(tiny)
+	ok(tiny.get_node_or_null(UiText.DRAWER) == null and tiny.visible_characters == -1 and tiny.get_theme_font_size("normal_font_size") == 20, "a text of an ordinary size is drawn by the node itself")
 
 
 ## What a TextMeshPro text takes from its assets and from other texts: the outline and underlay
@@ -879,6 +1010,8 @@ func _text_nodes() -> void:
 	eq(UiText.visible_length("a<b>bc</b><br>d <unknown>", true, true), 15, "the characters a text shows: tags are not counted, a break is one, an unknown tag is text")
 	eq(UiText.to_bbcode("ab<br>cd", true, 0, 20.0, true, 3, "…"), "ab\n…", "a cut at a line's first character")
 	await _text_styles(host)
+	await _text_margins(host)
+	await _text_small(host)
 	# a hand-built Label has no Unity settings: the plain properties are used
 	var l := Label.new()
 	host.add_child(l)

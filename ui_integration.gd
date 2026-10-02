@@ -751,6 +751,9 @@ func _new_control(primary: String, keys: Dictionary) -> Control:
 			node.bbcode_enabled = true
 			node.scroll_active = false
 			node.fit_content = false
+			# (a label that wraps is at least 1 wide, which a rect in metres is not: whether
+			# the text wraps is set with its settings)
+			node.autowrap_mode = TextServer.AUTOWRAP_OFF
 		"Image", "RawImage":
 			node = TextureRect.new()
 			node.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
@@ -1587,6 +1590,8 @@ func _configure_text(ctl: Control, keys: Dictionary, obj: RefCounted, state: Ref
 		"wrap": _to_int(fd.get("m_HorizontalOverflow", 0)) == 0,
 		"overflow": 0 if overflows else 3,
 	}
+	if not is_equal_approx(_to_float(fd.get("m_LineSpacing", 1.0)), 1.0):
+		settings["line_scale"] = _to_float(fd["m_LineSpacing"])
 	# the built-in font is Arial; a font of the project comes as one file
 	var font: Font = null
 	var fref: Array = obj.get_ref(fd, "m_Font") if fd.has("m_Font") else [null, 0, null, null]
@@ -1604,7 +1609,7 @@ func _tmp_settings(keys: Dictionary) -> Dictionary:
 	var wrap: bool = _to_int(keys.get("m_enableWordWrapping", 1)) != 0
 	if keys.has("m_TextWrappingMode"):
 		wrap = _to_int(keys["m_TextWrappingMode"]) in [1, 2]
-	return {
+	var settings: Dictionary = {
 		"text": str(keys["m_text"]) if keys.get("m_text") != null else "",
 		"tmp": true,
 		"rich": _to_int(keys.get("m_isRichText", 1)) != 0,
@@ -1616,6 +1621,23 @@ func _tmp_settings(keys: Dictionary) -> Dictionary:
 		"wrap": wrap,
 		"overflow": _to_int(keys.get("m_overflowMode", 0)),
 	}
+	var margin: Array = _tmp_margin(keys.get("m_margin"))
+	if margin != [0.0, 0.0, 0.0, 0.0]:
+		settings["margin"] = margin
+	if not is_zero_approx(_to_float(keys.get("m_lineSpacing", 0.0))):
+		settings["line"] = _to_float(keys["m_lineSpacing"])
+	return settings
+
+
+## TextMeshPro's m_margin (x: left, y: top, z: right, w: bottom) → [left, top, right, bottom].
+func _tmp_margin(v) -> Array:
+	if v is Quaternion or v is Vector4:
+		return [float(v.x), float(v.y), float(v.z), float(v.w)]
+	if v is Color:
+		return [float(v.r), float(v.g), float(v.b), float(v.a)]
+	if v is Dictionary:
+		return [_to_float(v.get("x", 0.0)), _to_float(v.get("y", 0.0)), _to_float(v.get("z", 0.0)), _to_float(v.get("w", 0.0))]
+	return [0.0, 0.0, 0.0, 0.0]
 
 
 func _configure_tmp(ctl: Control, keys: Dictionary, obj: RefCounted, state: RefCounted) -> void:
@@ -1641,7 +1663,7 @@ func _configure_tmp(ctl: Control, keys: Dictionary, obj: RefCounted, state: RefC
 ## Unity fields by which an overridden component is recognized when its file id is not known
 ## (a component inside a nested prefab instance): first field of the property path → kinds.
 const _OVERRIDE_FIELDS := {
-	"TextMeshProUGUI": ["m_text", "m_fontSize", "m_fontStyle", "m_fontColor", "m_fontColor32", "m_enableAutoSizing", "m_fontSizeMin", "m_fontSizeMax", "m_enableWordWrapping", "m_TextWrappingMode", "m_overflowMode", "m_isRichText", "m_HorizontalAlignment", "m_VerticalAlignment", "m_textAlignment"],
+	"TextMeshProUGUI": ["m_text", "m_fontSize", "m_fontStyle", "m_fontColor", "m_fontColor32", "m_enableAutoSizing", "m_fontSizeMin", "m_fontSizeMax", "m_enableWordWrapping", "m_TextWrappingMode", "m_overflowMode", "m_isRichText", "m_HorizontalAlignment", "m_VerticalAlignment", "m_textAlignment", "m_margin", "m_lineSpacing"],
 	"Text": ["m_Text", "m_FontData", "m_Color"],
 	"Image": ["m_Sprite", "m_Type", "m_PreserveAspect", "m_FillAmount", "m_FillMethod", "m_Color"],
 	"RawImage": ["m_Texture", "m_UVRect", "m_Color"],
@@ -1857,9 +1879,10 @@ func _override_component(kind: String, ctl: Control, uprops: Dictionary, obj: Re
 func _override_text(tmp: bool, ctl: Control, uprops: Dictionary) -> void:
 	var changes: Dictionary = {}
 	var fields: Array = [["m_text", "text"], ["m_fontSize", "size"], ["m_fontStyle", "style"], ["m_enableAutoSizing", "auto"], ["m_fontSizeMin", "min"], ["m_fontSizeMax", "max"], ["m_overflowMode", "overflow"], ["m_isRichText", "rich"],
-		["m_pageToDisplay", "page"], ["m_firstVisibleCharacter", "first"]]
+		["m_pageToDisplay", "page"], ["m_firstVisibleCharacter", "first"], ["m_lineSpacing", "line"]]
 	if not tmp:
-		fields = [["m_Text", "text"], ["m_FontData.m_FontSize", "size"], ["m_FontData.m_FontStyle", "style"], ["m_FontData.m_BestFit", "auto"], ["m_FontData.m_MinSize", "min"], ["m_FontData.m_MaxSize", "max"], ["m_FontData.m_RichText", "rich"]]
+		fields = [["m_Text", "text"], ["m_FontData.m_FontSize", "size"], ["m_FontData.m_FontStyle", "style"], ["m_FontData.m_BestFit", "auto"], ["m_FontData.m_MinSize", "min"], ["m_FontData.m_MaxSize", "max"], ["m_FontData.m_RichText", "rich"],
+			["m_FontData.m_LineSpacing", "line_scale"]]
 	for entry in fields:
 		if not uprops.has(entry[0]):
 			continue
@@ -1867,7 +1890,7 @@ func _override_text(tmp: bool, ctl: Control, uprops: Dictionary) -> void:
 		match entry[1]:
 			"text":
 				changes["text"] = str(v) if v != null else ""
-			"size", "min", "max":
+			"size", "min", "max", "line", "line_scale":
 				changes[entry[1]] = _to_float(v)
 			"style":
 				changes["style"] = _to_int(v) if tmp else (_to_int(v) & 3)
@@ -1877,6 +1900,15 @@ func _override_text(tmp: bool, ctl: Control, uprops: Dictionary) -> void:
 				changes[entry[1]] = _to_int(v) != 0
 	var current: Dictionary = UiText.settings(ctl)
 	if tmp:
+		# (a margin is overridden side by side: m_margin.x ...)
+		var margin: Array = (current["margin"] as Array).duplicate() if current.get("margin") is Array else [0.0, 0.0, 0.0, 0.0]
+		if uprops.has("m_margin"):
+			margin = _tmp_margin(uprops["m_margin"])
+		for side in range(4):
+			if uprops.has("m_margin." + "xyzw"[side]):
+				margin[side] = _to_float(uprops["m_margin." + "xyzw"[side]])
+		if margin != (current["margin"] if current.get("margin") is Array else [0.0, 0.0, 0.0, 0.0]):
+			changes["margin"] = margin
 		if uprops.has("m_TextWrappingMode"):
 			changes["wrap"] = _to_int(uprops["m_TextWrappingMode"]) in [1, 2]
 		elif uprops.has("m_enableWordWrapping"):

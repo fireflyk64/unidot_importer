@@ -12,7 +12,13 @@ extends RefCounted
 ##   {text, tmp: bool, rich: bool, size: float, style: int, auto: bool, min: float, max: float,
 ##    wrap: bool, overflow: int (0: drawn outside the rect, else cut at the rect),
 ##    box: float (TextMeshPro 3D: width of the text box in units),
+##    margin: [left, top, right, bottom] (TextMeshPro's margins: the text is laid out in the
+##    rect without them; a negative one gives room beyond the rect),
+##    line: float (TextMeshPro's line spacing: hundredths of the font size between lines),
+##    line_scale: float (uGUI's line spacing: a factor of the line height),
 ##    first: int (TextMeshPro's firstVisibleCharacter: the text starts there),
+##    visible: int, lines: int (TextMeshPro's maxVisibleCharacters / maxVisibleLines: no more
+##    is drawn of the text as it is laid out; absent or negative: all of it),
 ##    page: int (overflow mode 5: the page that is shown, from 1),
 ##    linked: NodePath (overflow mode 6: the text that goes on where this one ends),
 ##    outline: {ratio, color} and underlay: {x, y, dilate, color} (what the material of a
@@ -34,12 +40,19 @@ extends RefCounted
 ## Ellipsis) shows the lines that fit entirely; a masked one is clipped at the rect. A
 ## RichTextLabel draws from the top and leaves out the lines that start below its rect, so such
 ## a text is drawn by a child label as high as the content ("UnidotTextOverflow"), placed by
-## the alignment, while the node itself keeps the Unity rect and the text.
+## the alignment, while the node itself keeps the Unity rect and the text. A text with margins
+## is laid out in another rect than the node's: the same child draws it, there.
+##
+## Godot draws text at whole font sizes, 1 at least. A text smaller than SMALL (a canvas whose
+## units are metres has font sizes like 0.022) is laid out at RASTER by that child, in a rect
+## that many times larger, and the child is scaled down to the size the text has in Unity.
 
 const RT := preload("./rect_transform.gd")
 const META := &"unidot_text"
 const HELPER := "UnidotText"
 const DRAWER := "UnidotTextOverflow"
+const SMALL := 4.0
+const RASTER := 32.0
 
 ## Regular, bold, italic, bold italic: a family with the metrics of Liberation Sans, which is
 ## TextMeshPro's default font (LiberationSans SDF) and metric-compatible with uGUI's Arial.
@@ -146,10 +159,18 @@ static func render(n: Node) -> void:
 	if n is RichTextLabel:
 		n.bbcode_enabled = true
 		n.scroll_active = false
-		n.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART if bool(s["wrap"]) else TextServer.AUTOWRAP_OFF
+		# (a label that wraps is at least 1 wide: the node of a small text, which its child
+		# draws, does not wrap, or it could not have its rect)
+		n.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART if bool(s["wrap"]) and not _by_child(s) else TextServer.AUTOWRAP_OFF
 		# Unity text may run out of its rect (TextMeshPro's default overflow mode)
 		n.clip_contents = int(s["overflow"]) != 0
 		_show(n, s, size)
+		# a text that only the child can draw (margins, a size below a font's) shows nothing
+		# until it is laid out
+		if _by_child(s):
+			n.visible_characters = 0
+		elif n.get_node_or_null(DRAWER) == null:
+			n.visible_characters = -1
 		layout(n)
 	elif n is Label:
 		n.text = plain(str(s["text"]), bool(s["rich"]), int(s["style"]), bool(s["tmp"]))
@@ -166,15 +187,43 @@ static func render(n: Node) -> void:
 		n.set("text", str(s["text"]))
 
 
-static func _show(n: RichTextLabel, s: Dictionary, size: float) -> void:
+## Shows the text on a label at a font size of the label's own (`k`: how many times larger than
+## in Unity that is, see `raster`).
+static func _show(n: RichTextLabel, s: Dictionary, size: float, k: float = 1.0) -> void:
 	_rich_font_size(n, maxi(int(round(size)), 1))
 	_effects(n, s, size)
-	n.text = to_bbcode(str(s["text"]), bool(s["rich"]), int(s["style"]), size, bool(s["tmp"]), -1, "", _options(s))
+	_spacing(n, s, size)
+	n.text = to_bbcode(str(s["text"]), bool(s["rich"]), int(s["style"]), size, bool(s["tmp"]), -1, "", _options(s, 0, false, k))
 
 
 ## What to_bbcode needs beside the text: where it starts, the sprites of its <sprite> tags.
-static func _options(s: Dictionary, skip: int = 0, trim: bool = false) -> Dictionary:
-	return {"skip": int(s.get("first", 0)) + skip, "trim": trim, "sprites": s.get("sprites"), "sprite_sheet": s.get("sprite_sheet")}
+static func _options(s: Dictionary, skip: int = 0, trim: bool = false, k: float = 1.0) -> Dictionary:
+	return {"skip": int(s.get("first", 0)) + skip, "trim": trim, "sprites": s.get("sprites"), "sprite_sheet": s.get("sprite_sheet"), "scale": k}
+
+
+## How many times larger than in Unity a text of that size is laid out (see above): 1 for a
+## text of an ordinary size.
+static func _raster(size: float) -> float:
+	return RASTER / size if size > 0.0 and size < SMALL else 1.0
+
+
+## ... the text of a node: by the size it is drawn at (an auto-sized one: the size it was
+## fitted to).
+static func raster(s: Dictionary, n: Node = null) -> float:
+	if bool(s.get("auto", false)):
+		return _raster(float(n.get_meta(&"unidot_text_fit")) if n != null and n.has_meta(&"unidot_text_fit") else float(s.get("max", 72.0)))
+	return _raster(float(s.get("size", 14.0)))
+
+
+## Is the text drawn by the child whatever its rect: it has margins, or it is (or may be
+## fitted to) a size below a font's.
+static func _by_child(s: Dictionary) -> bool:
+	return _has_margins(s) or float(s.get("min", 1.0) if bool(s.get("auto", false)) else s.get("size", 14.0)) < SMALL
+
+
+static func _has_margins(s: Dictionary) -> bool:
+	var m = s.get("margin")
+	return m is Array and (m as Array).size() >= 4 and not (is_zero_approx(float(m[0])) and is_zero_approx(float(m[1])) and is_zero_approx(float(m[2])) and is_zero_approx(float(m[3])))
 
 
 ## A length the material gives in font sizes, in whole units: what is thinner than a unit but
@@ -198,6 +247,28 @@ static func _effects(n: RichTextLabel, s: Dictionary, size: float) -> void:
 		n.add_theme_constant_override("shadow_offset_x", _units(float(underlay.get("x", 0.0)), size))
 		n.add_theme_constant_override("shadow_offset_y", _units(float(underlay.get("y", 0.0)), size))
 		n.add_theme_constant_override("shadow_outline_size", _units(float(underlay.get("dilate", 0.0)), size))
+
+
+## The room between lines: TextMeshPro's line spacing is in hundredths of the font size,
+## uGUI's a factor of the font's line height. In whole units, as the label takes it.
+static func _spacing(n: RichTextLabel, s: Dictionary, size: float) -> void:
+	var extra: float = float(s.get("line", 0.0)) * size / 100.0
+	var scale: float = float(s.get("line_scale", 1.0))
+	if not is_equal_approx(scale, 1.0):
+		var font: Font = n.get_theme_font("normal_font")
+		if font != null:
+			extra += (scale - 1.0) * font.get_height(maxi(int(round(size)), 1))
+	if not is_zero_approx(extra) or n.has_theme_constant_override("line_separation"):
+		n.add_theme_constant_override("line_separation", roundi(extra))
+
+
+## The rect a text is laid out in, in the node's own coordinates: the node's rect without
+## TextMeshPro's margins.
+static func area(n: Control, s: Dictionary) -> Rect2:
+	var m = s.get("margin")
+	if not (m is Array) or (m as Array).size() < 4:
+		return Rect2(Vector2.ZERO, n.size)
+	return Rect2(float(m[0]), float(m[1]), maxf(n.size.x - float(m[0]) - float(m[2]), 0.0), maxf(n.size.y - float(m[1]) - float(m[3]), 0.0))
 
 
 static func _rich_font_size(n: RichTextLabel, size: int) -> void:
@@ -237,34 +308,15 @@ static func needs_layout(_s: Dictionary) -> bool:
 static func layout(n: Node) -> void:
 	if not (n is RichTextLabel) or not n.has_meta(META):
 		return
-	var s: Dictionary = n.get_meta(META)
+	var s: Dictionary = settings(n)
 	if bool(s.get("auto", false)):
 		fit(n)
 	_overflow(n, s)
 
 
-## A text higher than its rect is drawn by a child as high as the content (see above).
-static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
-	var drawer: RichTextLabel = n.get_node_or_null(DRAWER) as RichTextLabel
-	var mode: int = int(s.get("overflow", 0))
-	var content: float = 0.0
-	var over: bool = false
-	# a line that is not wrapped and is wider than the rect is cut as well
-	var wide: bool = false
-	if n.is_inside_tree() and n.size.x > 0.0:
-		content = float(n.get_content_height())
-		over = content > n.size.y + 0.5
-		wide = mode in CUT_MODES and n.autowrap_mode == TextServer.AUTOWRAP_OFF and float(n.get_content_width()) > n.size.x + 0.5
-	# a page that is not the first one is not what the node itself would draw
-	var paged: bool = mode == PAGE and int(s.get("page", 1)) > 1 and n.is_inside_tree() and n.size.x > 0.0
-	if not over and not wide and not paged:
-		if drawer != null:
-			n.remove_child(drawer)
-			drawer.queue_free()
-			n.visible_characters = -1
-		if mode == LINKED and n.is_inside_tree() and n.size.x > 0.0:
-			_link(n, s, -1)
-		return
+## The child that draws the text in place of the node (see above), with the node's fonts,
+## colours, alignment and text.
+static func _drawer(n: RichTextLabel, drawer: RichTextLabel, wrap: bool) -> RichTextLabel:
 	if drawer == null:
 		drawer = RichTextLabel.new()
 		drawer.name = DRAWER
@@ -285,64 +337,135 @@ static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
 	for item in ["outline_size", "shadow_offset_x", "shadow_offset_y", "shadow_outline_size", "line_separation"]:
 		if n.has_theme_constant_override(item):
 			drawer.add_theme_constant_override(item, n.get_theme_constant(item))
-	drawer.autowrap_mode = n.autowrap_mode
+	drawer.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART if wrap else TextServer.AUTOWRAP_OFF
 	drawer.horizontal_alignment = n.horizontal_alignment
 	drawer.vertical_alignment = VERTICAL_ALIGNMENT_TOP
 	drawer.self_modulate = n.self_modulate
 	drawer.text = n.text
-	drawer.size = Vector2(n.size.x, content)
+	return drawer
+
+
+## The label a text is laid out on: the node itself, or its child when the text has margins
+## (the child is then as wide as the rect without them) or is laid out `k` times larger.
+static func _laid_out(n: RichTextLabel, s: Dictionary, box: Rect2, k: float) -> RichTextLabel:
+	if not _by_child(s):
+		return n
+	var drawer: RichTextLabel = _drawer(n, n.get_node_or_null(DRAWER) as RichTextLabel, bool(s.get("wrap", true)))
+	if k != 1.0:
+		_show(drawer, s, drawn_font_size(n) * k, k)
+	drawer.size = Vector2(box.size.x * k, maxf(drawer.size.y, 1.0))
+	drawer.scale = Vector2.ONE / k
+	return drawer
+
+
+## A text higher than its rect, or one with margins, is drawn by a child as high as the content
+## (see above).
+static func _overflow(n: RichTextLabel, s: Dictionary) -> void:
+	var drawer: RichTextLabel = n.get_node_or_null(DRAWER) as RichTextLabel
+	var mode: int = int(s.get("overflow", 0))
+	var box: Rect2 = area(n, s)
+	var k: float = raster(s, n)
+	var wraps: bool = bool(s.get("wrap", true))
+	var ready: bool = n.is_inside_tree() and box.size.x > 0.0
+	var inset: bool = ready and _by_child(s)
+	var laid: RichTextLabel = n
+	if inset:
+		laid = _laid_out(n, s, box, k)
+		drawer = laid
+	# (the area in the units of the label the text is laid out on)
+	var limit: Vector2 = box.size * k
+	var content: float = 0.0
+	var over: bool = false
+	# a line that is not wrapped and is wider than the rect is cut as well
+	var wide: bool = false
+	if ready:
+		content = float(laid.get_content_height())
+		over = content > limit.y + 0.5
+		wide = mode in CUT_MODES and not wraps and float(laid.get_content_width()) > limit.x + 0.5
+	# a page that is not the first one is not what the node itself would draw
+	var paged: bool = mode == PAGE and int(s.get("page", 1)) > 1 and ready
+	if not over and not wide and not paged and not inset:
+		if drawer != null:
+			n.remove_child(drawer)
+			drawer.queue_free()
+		# (a text that only the child can draw stays hidden until it is laid out)
+		if not _by_child(s):
+			n.visible_characters = _shown_characters(n, s, -1) if ready else -1
+		if mode == LINKED and ready:
+			_link(n, s, -1)
+		return
+	if not inset:
+		drawer = _drawer(n, drawer, wraps)
+	drawer.size = Vector2(limit.x, content)
+	drawer.scale = Vector2.ONE / k
 	# what is drawn: everything, or the lines that fit entirely
 	var shown: float = content
 	var characters: int = -1
-	if mode == ELLIPSIS or (wide and mode in CUT_MODES):
+	if mode == ELLIPSIS and over or (wide and mode in CUT_MODES):
 		# the longest beginning of the text that fits the rect (with the ellipsis after it, in
 		# TextMeshPro's Ellipsis mode): found by laying it out
 		var raw: String = str(s.get("text", ""))
 		var rich: bool = bool(s.get("rich", true))
 		var tmp: bool = bool(s.get("tmp", true))
 		var style: int = int(s.get("style", 0))
-		var size: float = float(n.get_theme_font_size("normal_font_size"))
+		var size: float = float(drawer.get_theme_font_size("normal_font_size"))
 		var total: int = maxi(visible_length(raw, rich, tmp) - int(s.get("first", 0)), 0)
 		var tail: String = "…" if mode == ELLIPSIS else ""
-		var wrapped: bool = n.autowrap_mode != TextServer.AUTOWRAP_OFF
+		var wrapped: bool = wraps
 		var lo: int = 0
 		var hi: int = total
 		while lo < hi:
 			var mid: int = (lo + hi + 1) / 2
-			drawer.text = to_bbcode(raw, rich, style, size, tmp, mid, tail if mid < total else "", _options(s))
-			if float(drawer.get_content_height()) <= n.size.y + 0.5 and (wrapped or float(drawer.get_content_width()) <= n.size.x + 0.5):
+			drawer.text = to_bbcode(raw, rich, style, size, tmp, mid, tail if mid < total else "", _options(s, 0, false, k))
+			if float(drawer.get_content_height()) <= limit.y + 0.5 and (wrapped or float(drawer.get_content_width()) <= limit.x + 0.5):
 				lo = mid
 			else:
 				hi = mid - 1
-		drawer.text = to_bbcode(raw, rich, style, size, tmp, lo, tail if lo < total else "", _options(s))
-		shown = minf(float(drawer.get_content_height()), n.size.y) if lo > 0 else 0.0
+		drawer.text = to_bbcode(raw, rich, style, size, tmp, lo, tail if lo < total else "", _options(s, 0, false, k))
+		shown = minf(float(drawer.get_content_height()), limit.y) if lo > 0 else 0.0
 		if lo == 0:
 			drawer.text = ""   # (not even one character and the ellipsis)
-	elif mode == PAGE:
+	elif mode == PAGE and (over or paged):
 		# the lines of the page, laid out as a text of their own
-		var range_: Array = page_range(n, int(s.get("page", 1)))
+		var range_: Array = page_range(laid, int(s.get("page", 1)), limit.y)
 		if range_.is_empty():
 			drawer.text = ""
 			shown = 0.0
 		else:
-			drawer.text = to_bbcode(str(s.get("text", "")), bool(s.get("rich", true)), int(s.get("style", 0)), float(n.get_theme_font_size("normal_font_size")), bool(s.get("tmp", true)),
-				range_[1] - range_[0], "", _options(s, range_[0], true))
-			shown = minf(float(drawer.get_content_height()), n.size.y)
-	elif mode in CUT_MODES:
-		var fit: Array = whole_lines(n)
+			drawer.text = to_bbcode(str(s.get("text", "")), bool(s.get("rich", true)), int(s.get("style", 0)), float(drawer.get_theme_font_size("normal_font_size")), bool(s.get("tmp", true)),
+				range_[1] - range_[0], "", _options(s, range_[0], true, k))
+			shown = minf(float(drawer.get_content_height()), limit.y)
+	elif mode in CUT_MODES and over:
+		var fit: Array = whole_lines(laid, limit.y)
 		shown = fit[0]
 		characters = fit[1]
 		if mode == LINKED:
 			_link(n, s, characters)
-	drawer.visible_characters = characters
+	elif mode == LINKED:
+		_link(n, s, -1)
+	drawer.visible_characters = _shown_characters(drawer, s, characters)
 	var y: float = 0.0
 	match n.vertical_alignment:
 		VERTICAL_ALIGNMENT_CENTER:
-			y = (n.size.y - shown) * 0.5
+			y = (box.size.y - shown / k) * 0.5
 		VERTICAL_ALIGNMENT_BOTTOM:
-			y = n.size.y - shown
-	drawer.position = Vector2(0.0, y)
+			y = box.size.y - shown / k
+	drawer.position = box.position + Vector2(0.0, y)
 	n.visible_characters = 0   # the node keeps the text (and measures it) but does not draw it
+
+
+## How many characters a laid out text shows: those its overflow mode leaves (`characters`,
+## -1: all), no more than maxVisibleCharacters and the characters of maxVisibleLines.
+static func _shown_characters(label: RichTextLabel, s: Dictionary, characters: int) -> int:
+	var most: int = int(s.get("visible", -1))
+	if most >= 0 and (characters < 0 or most < characters):
+		characters = most
+	var lines: int = int(s.get("lines", -1))
+	if lines >= 0 and lines < label.get_line_count():
+		var first: int = _line_start(label, lines)
+		if characters < 0 or first < characters:
+			characters = first
+	return characters
 
 
 ## TextMeshPro's Linked overflow: the text that does not fit goes on in another text
@@ -377,7 +500,9 @@ static func _line_start(n: RichTextLabel, line: int) -> int:
 ## TextMeshPro's Page overflow: the lines that fit the rect are a page, the next ones the next
 ## page. → [first character, the one after the last] of a page (from 1), [] when the text has
 ## no such page.
-static func page_range(n: RichTextLabel, page: int) -> Array:
+static func page_range(n: RichTextLabel, page: int, height: float = -1.0) -> Array:
+	if height < 0.0:
+		height = n.size.y
 	var lines: int = n.get_line_count()
 	var content: float = float(n.get_content_height())
 	var start: int = 0
@@ -387,7 +512,7 @@ static func page_range(n: RichTextLabel, page: int) -> Array:
 		var last: int = start
 		for i in range(start + 1, lines):
 			var bottom: float = n.get_line_offset(i + 1) if i + 1 < lines else content
-			if bottom - top > n.size.y + 0.5:
+			if bottom - top > height + 0.5:
 				break
 			last = i
 		if number == page:
@@ -399,14 +524,16 @@ static func page_range(n: RichTextLabel, page: int) -> Array:
 
 ## The lines of a text that fit its rect entirely: [their height, the number of characters
 ## in them].
-static func whole_lines(n: RichTextLabel) -> Array:
+static func whole_lines(n: RichTextLabel, limit: float = -1.0) -> Array:
+	if limit < 0.0:
+		limit = n.size.y
 	var lines: int = n.get_line_count()
 	var content: float = float(n.get_content_height())
 	var last: int = -1
 	var height: float = 0.0
 	for i in range(lines):
 		var bottom: float = n.get_line_offset(i + 1) if i + 1 < lines else content
-		if bottom > n.size.y + 0.5:
+		if bottom > limit + 0.5:
 			break
 		last = i
 		height = bottom
@@ -428,29 +555,65 @@ static func whole_lines(n: RichTextLabel) -> Array:
 
 
 ## Auto-sizing (TextMeshPro's enableAutoSizing, uGUI's best fit): the largest size between `min`
-## and `max` at which the text fits the rect.
+## and `max` at which the text fits the rect: a whole size, or any size below SMALL.
 static func fit(n: RichTextLabel) -> void:
-	if n.size.x <= 0.0 or n.size.y <= 0.0:
-		return
 	var s: Dictionary = settings(n)
-	var lo: int = maxi(int(ceil(float(s["min"]))), 1)
-	var hi: int = maxi(int(floor(float(s["max"]))), lo)
-	var best: int = lo
-	while lo <= hi:
-		var mid: int = (lo + hi) / 2
-		_show(n, s, float(mid))
-		if n.get_content_height() <= n.size.y + 0.5 and n.get_content_width() <= n.size.x + 0.5:
-			best = mid
-			lo = mid + 1
-		else:
-			hi = mid - 1
-	_show(n, s, float(best))
+	var box: Rect2 = area(n, s)
+	if box.size.x <= 0.0 or box.size.y <= 0.0:
+		return
+	var high: float = maxf(float(s["max"]), float(s["min"]))
+	var low: float = maxf(float(s["min"]), minf(high, 0.001))
+	var best: float = low
+	if low >= SMALL:
+		var lo: int = maxi(int(ceil(low)), 1)
+		var hi: int = maxi(int(floor(high)), lo)
+		best = float(lo)
+		while lo <= hi:
+			var mid: int = (lo + hi) / 2
+			if _fits(n, s, box, float(mid)):
+				best = float(mid)
+				lo = mid + 1
+			else:
+				hi = mid - 1
+	elif _fits(n, s, box, _whole(high)):
+		best = _whole(high)
+	else:
+		var lo: float = low
+		var hi: float = high
+		for i in range(16):
+			var mid: float = (lo + hi) * 0.5
+			if _fits(n, s, box, _whole(mid)):
+				lo = mid
+			else:
+				hi = mid
+		best = maxf(_whole(lo), low)
+	_show(n, s, maxf(best, 1.0))
 	n.set_meta(&"unidot_text_fit", best)
+
+
+static func _whole(size: float) -> float:
+	return floorf(size) if size >= SMALL else size
+
+
+## Does the text fit its area at a font size? (Laid out on the node, or on its child.)
+static func _fits(n: RichTextLabel, s: Dictionary, box: Rect2, size: float) -> bool:
+	var k: float = _raster(size)
+	var laid: RichTextLabel = n
+	if _by_child(s):
+		laid = _drawer(n, n.get_node_or_null(DRAWER) as RichTextLabel, bool(s.get("wrap", true)))
+		laid.size = Vector2(box.size.x * k, maxf(laid.size.y, 1.0))
+		laid.scale = Vector2.ONE / k
+	_show(laid, s, size * k, k)
+	return laid.get_content_height() <= box.size.y * k + 0.5 and laid.get_content_width() <= box.size.x * k + 0.5
 
 
 ## The size the text is drawn at: the fitted one for an auto-sized text.
 static func drawn_font_size(n: Node) -> float:
 	if n is RichTextLabel:
+		if n.has_meta(META):
+			var s: Dictionary = settings(n)
+			if raster(s, n) != 1.0:
+				return float(n.get_meta(&"unidot_text_fit")) if bool(s.get("auto", false)) and n.has_meta(&"unidot_text_fit") else float(s["size"])
 		return float(n.get_theme_font_size("normal_font_size"))
 	return font_size(n)
 
@@ -459,13 +622,20 @@ static func drawn_font_size(n: Node) -> float:
 ## the horizontal axis, wrapped at the current width on the vertical one.
 static func preferred_size(n: Control, axis: int) -> float:
 	if n is RichTextLabel:
-		if axis == 1:
-			return float(n.get_content_height())
+		# (TextMeshPro's margins are part of what the text asks for)
 		var s: Dictionary = settings(n)
+		var m: Array = s["margin"] if s.get("margin") is Array and (s["margin"] as Array).size() >= 4 else [0.0, 0.0, 0.0, 0.0]
+		var k: float = raster(s, n)
+		# (the child lays the text out when it has margins or is small)
+		var laid: RichTextLabel = n
+		if _by_child(s) and n.get_node_or_null(DRAWER) is RichTextLabel and (k != 1.0 or int(s.get("overflow", 0)) == 0):
+			laid = n.get_node(DRAWER)
+		if axis == 1:
+			return float(laid.get_content_height()) / k + float(m[1]) + float(m[3])
 		var font: Font = n.get_theme_font("bold_font" if int(s["style"]) & BOLD else "normal_font")
 		if font == null:
-			return float(n.get_content_width())
-		return font.get_multiline_string_size(n.get_parsed_text(), HORIZONTAL_ALIGNMENT_LEFT, -1, n.get_theme_font_size("normal_font_size")).x
+			return float(laid.get_content_width()) / k + float(m[0]) + float(m[2])
+		return font.get_multiline_string_size(n.get_parsed_text(), HORIZONTAL_ALIGNMENT_LEFT, -1, maxi(roundi(drawn_font_size(n) * k), 1)).x / k + float(m[0]) + float(m[2])
 	if n is Label:
 		var lf: Font = n.get_theme_font("font")
 		if lf == null:
@@ -568,7 +738,7 @@ static func to_bbcode(t: String, rich: bool, style: int, base_size: float, tmp: 
 					out += "[/color]"
 					colors -= 1
 			"size":
-				sizes.append(_size(value, float(sizes.back()), base_size))
+				sizes.append(_size(value, float(sizes.back()), base_size, float(options.get("scale", 1.0))))
 				out += "[font_size=%d]" % maxi(int(round(float(sizes.back()))), 1)
 			"/size":
 				if sizes.size() > 1:
@@ -708,15 +878,16 @@ static func _color(v: String, tmp: bool = true) -> String:
 
 
 ## `<size=24>`, `<size=150%>`, `<size=+4>`, `<size=1.5em>`
-static func _size(v: String, current: float, base: float) -> float:
+## (`scale`: how many times larger than in Unity the text is laid out, see `raster`)
+static func _size(v: String, current: float, base: float, scale: float = 1.0) -> float:
 	var t: String = v.strip_edges()
 	if t.ends_with("%"):
 		return base * t.trim_suffix("%").to_float() / 100.0
 	if t.ends_with("em"):
 		return current * t.trim_suffix("em").to_float()
 	if t.begins_with("+") or t.begins_with("-"):
-		return base + t.to_float()
-	return t.trim_suffix("px").to_float()
+		return base + t.to_float() * scale
+	return t.trim_suffix("px").to_float() * scale
 
 
 ## Split into [tag, value] pieces; text is ["", text]. `<#RRGGBB>` is TextMeshPro's short form

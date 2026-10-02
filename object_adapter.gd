@@ -27,6 +27,7 @@ const shaderlab := preload("./shaderlab.gd")
 const rect_transform := preload("./runtime/rect_transform.gd")
 const rect_anim := preload("./runtime/rect_anim.gd")
 const ui_anim := preload("./runtime/ui_anim.gd")
+const line_renderer_runtime := preload("./runtime/line_renderer.gd")
 const ui_integration := preload("./ui_integration.gd")
 
 var unidot_utils = unidot_utils_class.new()
@@ -6345,12 +6346,10 @@ class UnidotAudioClip:
 		return null
 
 
-## A LineRenderer: a MeshInstance3D named after the component that draws the line through its
-## positions as a strip of line segments, coloured from the first colour of its gradient to the
-## last. The Unity values are kept in the `unidot_line` metadata ({positions (Unity's: x to the
-## left of Godot's), world_space, loop, width, start_color, end_color}) for whatever redraws
-## the line when a script moves its points. Not drawn: the line's width (the segments are one
-## pixel wide), its material and texture.
+## A LineRenderer: a MeshInstance3D named after the component. What the line is goes to the
+## `unidot_line` metadata (positions in Unity's coordinates, width multiplier and curve, the
+## gradient, loop, world space, alignment: see runtime/line_renderer.gd), and that module
+## draws it as a ribbon: now, and again when something moves the points at run time.
 class UnidotLineRenderer:
 	extends UnidotBehaviour
 
@@ -6365,34 +6364,9 @@ class UnidotLineRenderer:
 		state.add_child(line, new_parent, self)
 		return line
 
-	static func line_mesh(info: Dictionary) -> ArrayMesh:
-		var positions: Array = info.get("positions", [])
-		if positions.size() < 2:
-			return null
-		var vertices := PackedVector3Array()
-		var colors := PackedColorArray()
-		var count: int = positions.size() + (1 if bool(info.get("loop", false)) else 0)
-		for i in range(count):
-			var p: Vector3 = positions[i % positions.size()]
-			vertices.append(Vector3(-p.x, p.y, p.z))
-			colors.append((info.get("start_color", Color.WHITE) as Color).lerp(info.get("end_color", Color.WHITE), float(i) / float(maxi(count - 1, 1))))
-		var arrays: Array = []
-		arrays.resize(Mesh.ARRAY_MAX)
-		arrays[Mesh.ARRAY_VERTEX] = vertices
-		arrays[Mesh.ARRAY_COLOR] = colors
-		var mesh := ArrayMesh.new()
-		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINE_STRIP, arrays)
-		var material := StandardMaterial3D.new()
-		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		material.vertex_color_use_as_albedo = true
-		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mesh.surface_set_material(0, material)
-		return mesh
-
 	func convert_properties(node: Node, uprops: Dictionary) -> Dictionary:
 		var outdict = self.convert_properties_component(node, uprops)
-		var info: Dictionary = (node.get_meta(&"unidot_line") as Dictionary).duplicate(true) if node != null and node.has_meta(&"unidot_line") else {
-			"positions": [], "world_space": true, "loop": false, "width": 1.0, "start_color": Color.WHITE, "end_color": Color.WHITE}
+		var info: Dictionary = line_renderer_runtime.info_of(node)
 		if uprops.get("m_Positions") is Array:
 			info["positions"] = (uprops["m_Positions"] as Array).filter(func(p) -> bool: return p is Vector3)
 		if uprops.has("m_UseWorldSpace"):
@@ -6402,18 +6376,13 @@ class UnidotLineRenderer:
 		var parameters = uprops.get("m_Parameters")
 		if parameters is Dictionary:
 			info["width"] = float(parameters.get("widthMultiplier", 1.0))
-			var gradient = parameters.get("colorGradient")
-			if gradient is Dictionary:
-				# (key N holds the colour of the Nth colour key and the alpha of the Nth alpha key)
-				var first = gradient.get("key0")
-				var last_color = gradient.get("key%d" % maxi(int(gradient.get("m_NumColorKeys", 2)) - 1, 0))
-				var last_alpha = gradient.get("key%d" % maxi(int(gradient.get("m_NumAlphaKeys", 2)) - 1, 0))
-				if first is Color:
-					info["start_color"] = first
-				if last_color is Color:
-					info["end_color"] = Color(last_color.r, last_color.g, last_color.b, last_alpha.a if last_alpha is Color else last_color.a)
+			info["alignment"] = int(parameters.get("alignment", 0))
+			if parameters.get("widthCurve") is Dictionary:
+				info["width_curve"] = UnidotParticleSystem.curve_from(parameters["widthCurve"])
+			if parameters.get("colorGradient") is Dictionary:
+				info["gradient"] = UnidotParticleSystem.gradient_from(parameters["colorGradient"])
 		outdict["metadata/unidot_line"] = info
-		outdict["mesh"] = line_mesh(info)
+		outdict["mesh"] = line_renderer_runtime.mesh(info)
 		# positions of the world are drawn where they are, whatever the object does
 		outdict["top_level"] = bool(info["world_space"])
 		if bool(info["world_space"]):

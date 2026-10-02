@@ -14,6 +14,7 @@ extends RefCounted
 ## nothing; `text` the characters a text control shows and `font_size` their size.
 
 const RT := preload("../runtime/rect_transform.gd")
+const UiText := preload("../runtime/ui_text.gd")
 
 
 static func dump(scene: Node) -> Dictionary:
@@ -117,15 +118,21 @@ static func _walk(n: Node, prefix: String, out: Array, spatial: Array) -> void:
 	}
 	if ctl is RichTextLabel:
 		e["text"] = ctl.get_parsed_text()
-		e["font_size"] = ctl.get_theme_font_size("normal_font_size")
+		# a text smaller than a font can be is laid out `k` times larger by its drawing child
+		# (runtime/ui_text.gd): what that child draws, in the units of the rect
+		var drawer: RichTextLabel = ctl.get_node_or_null("UnidotTextOverflow") as RichTextLabel
+		var k: float = UiText.raster(UiText.settings(ctl), ctl) if ctl.has_meta(UiText.META) else 1.0
+		var shown: RichTextLabel = drawer if drawer != null and k != 1.0 else ctl
+		e["raster"] = k
+		e["font_size"] = UiText.drawn_font_size(ctl)
 		e["font"] = font_family(ctl.get_theme_font("normal_font"))
 		# what is drawn around the glyphs, the fonts behind the font, the pictures in the text
-		if ctl.has_theme_constant_override("outline_size") and ctl.get_theme_constant("outline_size") > 0:
-			var oc: Color = ctl.get_theme_color("font_outline_color")
-			e["outline"] = [ctl.get_theme_constant("outline_size"), oc.r, oc.g, oc.b, oc.a]
-		if ctl.has_theme_color_override("font_shadow_color") and ctl.get_theme_color("font_shadow_color").a > 0.0:
-			var sc: Color = ctl.get_theme_color("font_shadow_color")
-			e["shadow"] = [ctl.get_theme_constant("shadow_offset_x"), ctl.get_theme_constant("shadow_offset_y"), sc.r, sc.g, sc.b, sc.a]
+		if shown.has_theme_constant_override("outline_size") and shown.get_theme_constant("outline_size") > 0:
+			var oc: Color = shown.get_theme_color("font_outline_color")
+			e["outline"] = [shown.get_theme_constant("outline_size") / k, oc.r, oc.g, oc.b, oc.a]
+		if shown.has_theme_color_override("font_shadow_color") and shown.get_theme_color("font_shadow_color").a > 0.0:
+			var sc: Color = shown.get_theme_color("font_shadow_color")
+			e["shadow"] = [shown.get_theme_constant("shadow_offset_x") / k, shown.get_theme_constant("shadow_offset_y") / k, sc.r, sc.g, sc.b, sc.a]
 		var fallbacks: Array = []
 		var shown_font: Font = ctl.get_theme_font("normal_font")
 		for fallback in (shown_font.fallbacks if shown_font != null else []):
@@ -133,9 +140,17 @@ static func _walk(n: Node, prefix: String, out: Array, spatial: Array) -> void:
 		e["fallbacks"] = fallbacks
 		var pictures: Array = []
 		var img := RegEx.create_from_string("\\[img width=(\\d+) height=(\\d+) region=(\\d+),(\\d+),(\\d+),(\\d+)\\]")
-		for found in img.search_all(ctl.text):
-			pictures.append([found.get_string(3).to_int(), found.get_string(4).to_int(), found.get_string(5).to_int(), found.get_string(6).to_int(), found.get_string(1).to_int(), found.get_string(2).to_int()])
+		for found in img.search_all(shown.text):
+			pictures.append([found.get_string(3).to_int(), found.get_string(4).to_int(), found.get_string(5).to_int(), found.get_string(6).to_int(), found.get_string(1).to_int() / k, found.get_string(2).to_int() / k])
 		e["sprites"] = pictures
+		# where the text is laid out (a text with margins: by its drawing child) and the room
+		# between its lines
+		if drawer != null:
+			e["text_box"] = [drawer.position.x, drawer.position.y, drawer.size.x / k, drawer.size.y / k, drawer.get_line_count()]
+		e["valign"] = int(ctl.vertical_alignment)
+		e["line_spacing"] = (shown.get_theme_constant("line_separation") / k) if shown.has_theme_constant_override("line_separation") else 0.0
+		var line_font: Font = shown.get_theme_font("normal_font")
+		e["line_height"] = (line_font.get_height(shown.get_theme_font_size("normal_font_size")) / k) if line_font != null else 0.0
 	elif ctl is Label or ctl is Button or ctl is LineEdit:
 		e["text"] = str(ctl.text)
 		e["font_size"] = ctl.get_theme_font_size("font_size")
