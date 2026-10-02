@@ -29,6 +29,8 @@ func near(a, b, what: String, eps: float = 0.01) -> void:
 	var good: bool = false
 	if a is Vector2 and b is Vector2:
 		good = (a - b).length() <= eps
+	elif a is Color and b is Color:
+		good = absf(a.r - b.r) <= eps and absf(a.g - b.g) <= eps and absf(a.b - b.b) <= eps and absf(a.a - b.a) <= eps
 	elif a is Vector3 and b is Vector3:
 		good = (a - b).length() <= eps
 	else:
@@ -132,7 +134,106 @@ func _init() -> void:
 	near(RT.anchored_position(knob), Vector2(70, 10), "the sliding clip at its end")
 	near(RT.drawn_point(knob, Vector2.ZERO), Vector3(10.2 + 0.07 - 0.06, 3.04 + 0.01 + 0.04, 2), "... its top-left corner (60 x 40 at twice its scale)", 0.002)
 	await _component_curves(scene)
+	await _transitions(scene)
 	_done()
+
+
+## The pointer, as the viewport of `c` receives it: moved to the middle of `c` (or off the
+## canvas), the left button pressed or released there.
+func _point(c: Control, on: bool = true) -> Vector2:
+	var p: Vector2 = c.get_global_transform_with_canvas() * (c.size * 0.5) if on else Vector2(-50, -50)
+	var move := InputEventMouseMotion.new()
+	move.position = p
+	move.global_position = p
+	c.get_viewport().push_input(move, true)
+	return p
+
+
+func _button(c: Control, pressed: bool) -> void:
+	var ev := InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_LEFT
+	ev.pressed = pressed
+	ev.button_mask = MOUSE_BUTTON_MASK_LEFT if pressed else 0
+	ev.position = _point(c)
+	ev.global_position = ev.position
+	c.get_viewport().push_input(ev, true)
+
+
+func _region_x(c: Control) -> float:
+	var tex: Texture2D = (c as TextureRect).texture if c is TextureRect else Graphic.state(c).get("texture")
+	return (tex as AtlasTexture).region.position.x if tex is AtlasTexture else -1.0
+
+
+## The "Transitions" canvas: what a Selectable does over time, driven by the pointer. BtnSwap
+## shows the left sprite of the sheet and the right one while highlighted (BtnSwapOff, not
+## interactable, its disabled sprite: the right one); BtnFade's tint goes to red in 0.2 s;
+## BtnAnim's Animator scales it to 1.2 (highlighted) and 0.9 (pressed) by triggers;
+## ToggleFade's check mark fades in 0.1 s.
+func _transitions(scene: Node) -> void:
+	var holder: Node = _find(scene, "Transitions")
+	var canvas: Control = RT.root_control(holder) if holder != null else null
+	ok(canvas != null, "the Transitions canvas of the fixture")
+	if canvas == null:
+		return
+	var swap: Control = canvas.get_node("BtnSwap")
+	var swap_off: Control = canvas.get_node("BtnSwapOff")
+	var fade: Control = canvas.get_node("BtnFade")
+	var anim: Control = canvas.get_node("BtnAnim")
+	var toggle: BaseButton = canvas.get_node("ToggleFade")
+	var mark: Control = toggle.get_node("Background/Checkmark")
+	# sprite swap
+	near(_region_x(swap), 0.0, "sprite swap at rest: the Image's own sprite (the left of the sheet)")
+	near(_region_x(swap_off), 32.0, "... a button that is not interactable shows its disabled sprite")
+	_point(swap)
+	await _frames(3)
+	near(_region_x(swap), 32.0, "the pointer over it: the highlighted sprite")
+	_point(swap, false)
+	await _frames(3)
+	near(_region_x(swap), 0.0, "... and its own again when the pointer leaves")
+	# colour tint over fadeDuration
+	near(Graphic.renderer_color(fade).g, 1.0, "colour tint at rest: the normal colour")
+	_point(fade)
+	await _frames(2)
+	var green: float = Graphic.renderer_color(fade).g
+	ok(green > 0.5 and green <= 1.0, "the pointer over it: the tint has only begun to fade: %s" % str(green))
+	await create_timer(0.1).timeout
+	green = Graphic.renderer_color(fade).g
+	ok(green > 0.05 and green < 0.95, "... is on its way after 0.1 s: %s" % str(green))
+	await create_timer(0.25).timeout
+	near(Graphic.renderer_color(fade), Color(1, 0, 0, 1), "... and there after fadeDuration (0.2 s)")
+	near(Graphic.drawn_color(fade), Color(1, 0, 0, 1), "... which is what is drawn")
+	_point(fade, false)
+	await create_timer(0.3).timeout
+	near(Graphic.renderer_color(fade), Color(1, 1, 1, 1), "... back to normal after the pointer left")
+	# animation transition
+	var tree: AnimationTree = anim.get_node_or_null("AnimationTree") as AnimationTree
+	ok(tree != null and tree.active, "the animated button has its Animator")
+	near(RT.local_scale(anim), Vector3.ONE, "animation transition at rest: the Normal state")
+	_point(anim)
+	await create_timer(0.4).timeout
+	near(RT.local_scale(anim), Vector3(1.2, 1.2, 1), "the pointer over it: the Highlighted trigger plays its state")
+	ok(tree != null and tree.get_meta("Highlighted", false) == false, "... and the trigger is used up")
+	_button(anim, true)
+	await create_timer(0.4).timeout
+	near(RT.local_scale(anim), Vector3(0.9, 0.9, 1), "pressed: the Pressed state")
+	_button(anim, false)
+	_point(anim, false)
+	await create_timer(0.5).timeout
+	# (Unity's EventSystem keeps a clicked button selected until something else is)
+	near(RT.local_scale(anim), Vector3(1.2, 1.2, 1), "released and left: the button stays selected (the Selected state)")
+	anim.release_focus()
+	await create_timer(0.5).timeout
+	near(RT.local_scale(anim), Vector3.ONE, "... and is Normal again when the selection goes elsewhere")
+	# the Toggle's check mark
+	near(Graphic.renderer_color(mark).a, 0.0, "a toggle that is off: no check mark")
+	_button(toggle, true)
+	_button(toggle, false)
+	await _frames(2)
+	var alpha: float = Graphic.renderer_color(mark).a
+	ok(toggle.button_pressed and alpha < 0.9, "clicked: on, the mark has only begun to fade in: %s" % str(alpha))
+	await create_timer(0.2).timeout
+	near(Graphic.renderer_color(mark).a, 1.0, "... and is shown after 0.1 s")
+	_point(toggle, false)
 
 
 ## The "AnimatedUi" canvas (500 x 300 at Unity (11.4, 3, 2)): the panel "Show" has an Animator
@@ -212,6 +313,7 @@ func _component_curves(scene: Node) -> void:
 	await _frames(2)
 	ok(not Graphic.enabled(blink) and is_zero_approx(Graphic.drawn_color(blink).a) and blink.visible, "Fade at 0.75 s: the Image component is disabled (its object is not hidden)")
 	ok(not hide.visible, "... the object whose m_IsActive went to 0 is hidden")
+	await create_timer(0.2).timeout   # (the check mark fades in)
 	ok(check.button_pressed and is_equal_approx(Graphic.drawn_color(check.get_node("Mark")).a, 1.0), "... the Toggle is on and shows its check mark")
 	ok(go.disabled, "... the Button is not interactable")
 	# the sprite of an Image

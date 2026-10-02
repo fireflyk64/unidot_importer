@@ -153,25 +153,9 @@ var is_on: float:
 ## (metadata `unidot_sprite`: {border}).
 var sprite: Texture2D:
 	get:
-		var h: Control = _host()
-		if h is TextureRect:
-			return h.texture
-		return Graphic.state(h).get("texture") as Texture2D if h != null else null
+		return Graphic.sprite(_host())
 	set(v):
-		var h: Control = _host()
-		if h == null:
-			return
-		var changes: Dictionary = {}
-		var drawing = Graphic.state(h).get("sprite")
-		if v != null and v.has_meta(&"unidot_sprite") and drawing is Dictionary:
-			var changed: Dictionary = (drawing as Dictionary).duplicate()
-			changed["border"] = (v.get_meta(&"unidot_sprite") as Dictionary).get("border", changed.get("border", [0, 0, 0, 0]))
-			changes["sprite"] = changed
-		if h is TextureRect:
-			h.texture = v
-		else:
-			changes["texture"] = v
-		Graphic.update(h, changes)
+		Graphic.set_sprite(_host(), v)
 
 
 ## Give the node of an animated object the helper (the importer).

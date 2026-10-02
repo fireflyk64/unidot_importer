@@ -1557,6 +1557,11 @@ class UnidotAnimatorController:
 			var param_name: StringName = get_unique_identifier(param["m_Name"], tmp_used_params)
 			parameters[param["m_Name"]] = {"uniq_name": param_name, "type": type, "default": defval}
 			blended_layers.set_meta(param_name, defval)  # toplevel meta is used.
+			if type == "trigger":
+				# (runtime/anim_tree.gd resets a trigger when a transition has used it)
+				var trigger_names: PackedStringArray = blended_layers.get_meta(&"unidot_triggers", PackedStringArray())
+				trigger_names.append(param_name)
+				blended_layers.set_meta(&"unidot_triggers", trigger_names)
 		var lay_x: float = 0.0
 		var last_output: StringName = &""
 		var used_names: Dictionary = {}.duplicate()

@@ -829,6 +829,7 @@ func _selectables() -> void:
 	eq(Graphic.renderer_color(a[2]), Color(1, 1, 1, 1), "normal colour on the target graphic")
 	(a[0] as Slider).editable = false
 	Selectable.refresh_host(a[0])
+	_end_fade(a[2])
 	eq(Graphic.renderer_color(a[2]), Color(0.5, 0.5, 0.5, 0.5), "disabled colour when not interactable")
 	(a[0] as Slider).editable = true
 	Selectable.apply(a[0], "pressed")
@@ -867,7 +868,9 @@ func _selectables() -> void:
 	eq(Graphic.renderer_color(gbutton), Color(1, 1, 1, 1), "a button below a group that allows interaction: normal colour")
 	UiGroup.update(group, {"interactable": false, "alpha": 0.5})
 	ok(not Selectable.interactable(gbutton) and not gbutton.disabled, "a group that is not interactable stops the button (its own flag stays)")
-	eq(Graphic.renderer_color(gbutton), Color(0.5, 0.5, 0.5, 0.5), "... which shows its disabled colour at once")
+	eq(Graphic.renderer_color(gbutton), Color(1, 1, 1, 1), "... which fades to its disabled colour (fadeDuration 0.1): not yet")
+	Graphic.fade_of(gbutton).custom_step(0.11)
+	eq(Graphic.renderer_color(gbutton), Color(0.5, 0.5, 0.5, 0.5), "... and there after 0.1 s")
 	eq(group.mouse_behavior_recursive, Control.MOUSE_BEHAVIOR_DISABLED, "... and takes no pointer input, nor does anything below")
 	near(group.modulate.a, 0.5, "the group's alpha fades everything below")
 	var inner_group := Control.new()
@@ -878,6 +881,7 @@ func _selectables() -> void:
 	ok(Selectable.interactable(ibutton), "a group that ignores its parents starts over")
 	eq(inner_group.mouse_behavior_recursive, Control.MOUSE_BEHAVIOR_ENABLED, "... for the pointer too")
 	UiGroup.update(group, {"interactable": true})
+	Graphic.fade_of(gbutton).custom_step(0.11)
 	eq(Graphic.renderer_color(gbutton), Color(1, 1, 1, 1), "interactable again: normal colour")
 	eq(group.mouse_behavior_recursive, Control.MOUSE_BEHAVIOR_INHERITED, "... and input as before")
 	# colour multiplier
@@ -885,9 +889,127 @@ func _selectables() -> void:
 	cfg["colors"] = {"normalColor": Color(0.4, 0.4, 0.4, 1), "colorMultiplier": 2.0}
 	toggle.set_meta(Selectable.META, cfg)
 	Selectable.refresh_host(toggle)
+	_end_fade(back)
 	near(Graphic.renderer_color(back).r, 0.8, "the colour multiplier")
 	eq(Graphic.renderer_color(back).a, 1.0, "... clamped")
 	eq(Selectable.colors(toggle)["pressedColor"], Selectable.DEFAULT_COLORS["pressedColor"], "missing colours of the block are Unity's defaults")
+	host.queue_free()
+	await process_frame
+	await _selectable_transitions()
+
+
+## A fade that runs (the tint of a Selectable with a helper node) is brought to its end.
+func _end_fade(c: Node) -> void:
+	var fade: Tween = Graphic.fade_of(c)
+	if fade != null:
+		fade.custom_step(10.0)
+
+
+func _selectable_helper(c: Control) -> Node:
+	var helper := Node.new()
+	helper.name = Selectable.HELPER
+	helper.set_script(Selectable)
+	c.add_child(helper)
+	return helper
+
+
+## Selectable transitions over time: the tint fades over fadeDuration (Graphic.CrossFadeColor),
+## the sprites of a sprite swap, the check mark of a Toggle that fades. The fades are stepped
+## by hand.
+func _selectable_transitions() -> void:
+	var host := Control.new()
+	host.size = Vector2(400, 400)
+	root.add_child(host)
+	var button := Button.new()
+	host.add_child(button)
+	_rt(button, {"size_delta": Vector2(100, 30)})
+	var face: TextureRect = _image(button, "Face", {"anchor_min": Vector2.ZERO, "anchor_max": Vector2.ONE, "size_delta": Vector2.ZERO})
+	button.set_meta(Selectable.META, {"transition": 1, "target": button.get_path_to(face),
+		"colors": {"normalColor": Color(1, 1, 1, 1), "highlightedColor": Color(0, 0, 0, 1), "disabledColor": Color(1, 0, 0, 0.5), "fadeDuration": 0.2}})
+	var helper: Node = _selectable_helper(button)
+	eq(Graphic.renderer_color(face), Color(1, 1, 1, 1), "a Selectable that appears has its colour at once")
+	ok(Graphic.fade_of(face) == null, "... nothing fades")
+	helper._inside = true
+	helper.refresh()
+	eq(Graphic.renderer_color(face), Color(1, 1, 1, 1), "the pointer enters: the tint starts from where it is")
+	Graphic.fade_of(face).custom_step(0.1)
+	near(Graphic.renderer_color(face).r, 0.5, "half of fadeDuration: half way to the highlighted colour")
+	near(Graphic.renderer_color(face).a, 1.0, "... its alpha too")
+	helper.refresh()
+	Graphic.fade_of(face).custom_step(0.1)
+	eq(Graphic.renderer_color(face), Color(0, 0, 0, 1), "a refresh in the same state does not start the fade again: there after fadeDuration")
+	ok(Graphic.fade_of(face) == null, "... and the fade is over")
+	helper._inside = false
+	helper.refresh()
+	Graphic.fade_of(face).custom_step(0.05)
+	near(Graphic.renderer_color(face).r, 0.25, "leaving: a quarter of the way back")
+	helper._inside = true
+	helper.refresh()
+	Graphic.fade_of(face).custom_step(0.1)
+	near(Graphic.renderer_color(face).r, 0.125, "a new state during a fade starts from the colour of that moment")
+	button.disabled = true
+	Selectable.refresh_host(button)
+	Graphic.fade_of(face).custom_step(0.2)
+	eq(Graphic.renderer_color(face), Color(1, 0, 0, 0.5), "a script that disables it: the disabled colour after the fade")
+	button.disabled = false
+	var cfg: Dictionary = (button.get_meta(Selectable.META) as Dictionary).duplicate(true)
+	cfg["colors"]["fadeDuration"] = 0.0
+	button.set_meta(Selectable.META, cfg)
+	helper._inside = false
+	helper.refresh()
+	eq(Graphic.renderer_color(face), Color(1, 1, 1, 1), "fadeDuration 0: at once")
+	# Graphic.CrossFadeAlpha / CrossFadeColor without alpha
+	Graphic.cross_fade(face, Color(0, 0, 0, 0.5), 1.0, true, false)
+	Graphic.fade_of(face).custom_step(0.5)
+	eq(Graphic.renderer_color(face), Color(1, 1, 1, 0.75), "CrossFadeAlpha leaves the colour alone")
+	Graphic.cross_fade(face, Color(0, 0, 0, 0), 1.0, false, true)
+	Graphic.fade_of(face).custom_step(1.0)
+	eq(Graphic.renderer_color(face), Color(0, 0, 0, 0.75), "CrossFadeColor without alpha leaves the alpha alone")
+	Graphic.cross_fade(face, Color(1, 1, 1, 1), 0.0)
+	eq(Graphic.renderer_color(face), Color(1, 1, 1, 1), "a fade of no duration is a set")
+	# sprite swap: the override sprite of the state; Image.sprite stays what it is
+	var own := GradientTexture2D.new()
+	var over := GradientTexture2D.new()
+	var down := GradientTexture2D.new()
+	var swap := Button.new()
+	host.add_child(swap)
+	_rt(swap, {"anchored_position": Vector2(0, 50), "size_delta": Vector2(100, 30)})
+	var picture: TextureRect = _image(swap, "Picture", {"anchor_min": Vector2.ZERO, "anchor_max": Vector2.ONE, "size_delta": Vector2.ZERO})
+	picture.texture = own
+	swap.set_meta(Selectable.META, {"transition": 2, "target": swap.get_path_to(picture), "sprites": {"highlighted": over, "pressed": down}})
+	var swapper: Node = _selectable_helper(swap)
+	ok(picture.texture == own, "sprite swap, at rest: the Image's own sprite")
+	swapper._inside = true
+	swapper.refresh()
+	ok(picture.texture == over and Graphic.sprite(picture) == own, "highlighted: its sprite is drawn, Image.sprite is the own one")
+	eq(Graphic.renderer_color(picture), Color(1, 1, 1, 1), "... and no tint")
+	swapper._down = true
+	swapper.refresh()
+	ok(picture.texture == down, "pressed: the pressed sprite")
+	var other := GradientTexture2D.new()
+	Graphic.set_sprite(picture, other)
+	ok(picture.texture == down and Graphic.sprite(picture) == other, "a sprite set meanwhile waits behind the override")
+	swapper._down = false
+	swapper._inside = false
+	swapper.refresh()
+	ok(picture.texture == other, "normal: the override is gone")
+	swap.disabled = true
+	Selectable.refresh_host(swap)
+	ok(picture.texture == other, "a state without a sprite shows the own one")
+	# the check mark of a Toggle fades in 0.1 s (ToggleTransition.Fade)
+	var toggle := Button.new()
+	toggle.toggle_mode = true
+	host.add_child(toggle)
+	var mark: TextureRect = _image(toggle, "Checkmark", {"size_delta": Vector2(16, 16)})
+	toggle.set_meta(Selectable.META, {"transition": 0, "graphic": toggle.get_path_to(mark), "toggle_fade": true})
+	_selectable_helper(toggle)
+	eq(Graphic.renderer_color(mark).a, 0.0, "a toggle that is off: no check mark, at once")
+	toggle.button_pressed = true
+	eq(Graphic.renderer_color(mark).a, 0.0, "switched on: the mark fades in")
+	Graphic.fade_of(mark).custom_step(0.05)
+	near(Graphic.renderer_color(mark).a, 0.5, "... half way after 0.05 s")
+	Graphic.fade_of(mark).custom_step(0.05)
+	eq(Graphic.renderer_color(mark).a, 1.0, "... shown after 0.1 s")
 	host.queue_free()
 	await process_frame
 

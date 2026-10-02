@@ -230,6 +230,51 @@ func _ready():
 		for prop_data in get_property_list():
 			if prop_data["name"].begins_with("parameters/"):
 				_setup_blend_to_meta(prop_data["name"])
+	if not Engine.is_editor_hint() and not mixer_applied.is_connected(_consume_triggers):
+		mixer_applied.connect(_consume_triggers)
+
+
+var _trigger_machines: Dictionary = {}   # playback property → its state machine
+var _trigger_root: AnimationNode = null
+var _trigger_at: Dictionary = {}         # playback property → the state it was in
+
+## Unity's trigger parameters (their names: `unidot_triggers` of the tree's root) are bools that
+## the transition which uses them sets back: when a state machine has gone from one state to
+## another, the triggers named by that transition's condition are reset.
+func _consume_triggers() -> void:
+	if tree_root == null or not tree_root.has_meta(&"unidot_triggers"):
+		return
+	var triggers: PackedStringArray = tree_root.get_meta(&"unidot_triggers")
+	if _trigger_root != tree_root:
+		_trigger_root = tree_root
+		_trigger_machines.clear()
+		_trigger_at.clear()
+		if tree_root is AnimationNodeStateMachine:
+			_trigger_machines["parameters/playback"] = tree_root
+		elif tree_root is AnimationNodeBlendTree:
+			for prop_data in tree_root.get_property_list():
+				var prop: String = prop_data["name"]
+				if prop.begins_with("nodes/") and prop.ends_with("/node"):
+					var layer: String = prop.substr(6, prop.length() - 11)
+					if tree_root.get_node(layer) is AnimationNodeStateMachine:
+						_trigger_machines["parameters/" + layer + "/playback"] = tree_root.get_node(layer)
+	for prop in _trigger_machines:
+		var playback: AnimationNodeStateMachinePlayback = get(prop) as AnimationNodeStateMachinePlayback
+		if playback == null:
+			continue
+		var now: StringName = playback.get_current_node()
+		var was: StringName = _trigger_at.get(prop, &"")
+		if now == was:
+			continue
+		_trigger_at[prop] = now
+		var machine: AnimationNodeStateMachine = _trigger_machines[prop]
+		for i in range(machine.get_transition_count()):
+			if machine.get_transition_from(i) != was or machine.get_transition_to(i) != now:
+				continue
+			var words: PackedStringArray = machine.get_transition(i).advance_expression.split(" ")
+			for trigger in triggers:
+				if words.has(trigger) and get_meta(trigger, false) == true:
+					set("metadata/" + trigger, false)
 
 func _process(_delta: float):
 	for prop in seek_requests:

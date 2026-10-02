@@ -1109,6 +1109,9 @@ func _sprite_texture(ref: Array, obj: RefCounted) -> Texture2D:
 ## What a Selectable (Button, Toggle, Slider, InputField, Dropdown, Scrollbar) does to other
 ## objects: the colour tint of its target graphic, and the objects named by `refs`
 ## (Unity field → entry of the `unidot_selectable` metadata). runtime/selectable.gd applies it.
+const SPRITE_STATES := [["m_HighlightedSprite", "highlighted"], ["m_PressedSprite", "pressed"], ["m_SelectedSprite", "selected"], ["m_DisabledSprite", "disabled"]]
+const ANIMATION_TRIGGERS := [["m_NormalTrigger", "normal"], ["m_HighlightedTrigger", "highlighted"], ["m_PressedTrigger", "pressed"], ["m_SelectedTrigger", "selected"], ["m_DisabledTrigger", "disabled"]]
+
 func _selectable(ctl: Control, keys: Dictionary, obj: RefCounted, state: RefCounted, refs: Dictionary = {}) -> void:
 	var cfg: Dictionary = {"transition": _to_int(keys.get("m_Transition", 1))}
 	var block = keys.get("m_Colors")
@@ -1122,6 +1125,22 @@ func _selectable(ctl: Control, keys: Dictionary, obj: RefCounted, state: RefCoun
 		colors["colorMultiplier"] = _to_float(block.get("m_ColorMultiplier", 1.0))
 		colors["fadeDuration"] = _to_float(block.get("m_FadeDuration", 0.1))
 		cfg["colors"] = colors
+	if cfg["transition"] == 2 and keys.get("m_SpriteState") is Dictionary:
+		# sprite swap: the sprite of each state (none: the Image's own)
+		var sprites: Dictionary = {}
+		for pair in SPRITE_STATES:
+			var swap: Texture2D = animation_sprite((keys["m_SpriteState"] as Dictionary).get(pair[0]), obj)
+			if swap != null:
+				sprites[pair[1]] = swap
+		cfg["sprites"] = sprites
+	if cfg["transition"] == 3 and keys.get("m_AnimationTriggers") is Dictionary:
+		var triggers: Dictionary = {}
+		for pair in ANIMATION_TRIGGERS:
+			var trigger = (keys["m_AnimationTriggers"] as Dictionary).get(pair[0])
+			triggers[pair[1]] = str(trigger) if trigger != null else ""
+		cfg["triggers"] = triggers
+	if keys.has("toggleTransition"):
+		cfg["toggle_fade"] = _to_int(keys["toggleTransition"]) != 0
 	if keys.has("m_Direction"):
 		cfg["direction"] = _to_int(keys["m_Direction"])
 	if keys.has("m_FillRect"):
@@ -1136,12 +1155,12 @@ func _selectable(ctl: Control, keys: Dictionary, obj: RefCounted, state: RefCoun
 	ctl.set_meta(selectable_script.META, cfg)
 	var fields: Dictionary = {"m_TargetGraphic": "target"}
 	fields.merge(refs, true)
-	var drives: bool = false
+	var drives: bool = cfg["transition"] == 3   # (the triggers go to the object's own Animator)
 	for field in fields:
 		var ref = keys.get(field)
 		if typeof(ref) != TYPE_ARRAY or ref.size() < 2 or ref[1] == 0:
 			continue
-		if field == "m_TargetGraphic" and cfg["transition"] != 1:
+		if field == "m_TargetGraphic" and not (cfg["transition"] in [1, 2]):
 			continue
 		drives = true
 		var np: NodePath = _ref_path(ref, obj, ctl, String(selectable_script.META), fields[field])
@@ -1286,15 +1305,15 @@ const _OVERRIDE_FIELDS := {
 	"Text": ["m_Text", "m_FontData", "m_Color"],
 	"Image": ["m_Sprite", "m_Type", "m_PreserveAspect", "m_FillAmount", "m_FillMethod", "m_Color"],
 	"RawImage": ["m_Texture", "m_UVRect", "m_Color"],
-	"Toggle": ["m_IsOn", "graphic", "toggleTransition", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
-	"Slider": ["m_Value", "m_MinValue", "m_MaxValue", "m_WholeNumbers", "m_Direction", "m_FillRect", "m_HandleRect", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
-	"Scrollbar": ["m_Value", "m_Size", "m_Direction", "m_NumberOfSteps", "m_HandleRect", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"Toggle": ["m_IsOn", "graphic", "toggleTransition", "m_Interactable", "m_Colors", "m_SpriteState", "m_AnimationTriggers", "m_Transition", "m_TargetGraphic"],
+	"Slider": ["m_Value", "m_MinValue", "m_MaxValue", "m_WholeNumbers", "m_Direction", "m_FillRect", "m_HandleRect", "m_Interactable", "m_Colors", "m_SpriteState", "m_AnimationTriggers", "m_Transition", "m_TargetGraphic"],
+	"Scrollbar": ["m_Value", "m_Size", "m_Direction", "m_NumberOfSteps", "m_HandleRect", "m_Interactable", "m_Colors", "m_SpriteState", "m_AnimationTriggers", "m_Transition", "m_TargetGraphic"],
 	"ScrollRect": ["m_Content", "m_Viewport", "m_Horizontal", "m_Vertical", "m_MovementType", "m_Elasticity", "m_Inertia", "m_DecelerationRate", "m_ScrollSensitivity", "m_HorizontalScrollbar", "m_VerticalScrollbar", "m_HorizontalScrollbarVisibility", "m_VerticalScrollbarVisibility", "m_HorizontalScrollbarSpacing", "m_VerticalScrollbarSpacing"],
-	"InputField": ["m_Text", "m_CharacterLimit", "m_TextComponent", "m_Placeholder", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
-	"TMP_InputField": ["m_Text", "m_CharacterLimit", "m_TextComponent", "m_Placeholder", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
-	"Dropdown": ["m_Value", "m_Options", "m_CaptionText", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
-	"TMP_Dropdown": ["m_Value", "m_Options", "m_CaptionText", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
-	"Button": ["m_OnClick", "m_Interactable", "m_Colors", "m_Transition", "m_TargetGraphic"],
+	"InputField": ["m_Text", "m_CharacterLimit", "m_TextComponent", "m_Placeholder", "m_Interactable", "m_Colors", "m_SpriteState", "m_AnimationTriggers", "m_Transition", "m_TargetGraphic"],
+	"TMP_InputField": ["m_Text", "m_CharacterLimit", "m_TextComponent", "m_Placeholder", "m_Interactable", "m_Colors", "m_SpriteState", "m_AnimationTriggers", "m_Transition", "m_TargetGraphic"],
+	"Dropdown": ["m_Value", "m_Options", "m_CaptionText", "m_Interactable", "m_Colors", "m_SpriteState", "m_AnimationTriggers", "m_Transition", "m_TargetGraphic"],
+	"TMP_Dropdown": ["m_Value", "m_Options", "m_CaptionText", "m_Interactable", "m_Colors", "m_SpriteState", "m_AnimationTriggers", "m_Transition", "m_TargetGraphic"],
+	"Button": ["m_OnClick", "m_Interactable", "m_Colors", "m_SpriteState", "m_AnimationTriggers", "m_Transition", "m_TargetGraphic"],
 	"LayoutElement": ["m_IgnoreLayout", "m_MinWidth", "m_MinHeight", "m_PreferredWidth", "m_PreferredHeight", "m_FlexibleWidth", "m_FlexibleHeight", "m_LayoutPriority"],
 	"HorizontalLayoutGroup": ["m_Padding", "m_ChildAlignment", "m_Spacing", "m_ChildForceExpandWidth", "m_ChildForceExpandHeight", "m_ChildControlWidth", "m_ChildControlHeight", "m_ChildScaleWidth", "m_ChildScaleHeight", "m_ReverseArrangement"],
 	"VerticalLayoutGroup": ["m_Padding", "m_ChildAlignment", "m_Spacing", "m_ChildForceExpandWidth", "m_ChildForceExpandHeight", "m_ChildControlWidth", "m_ChildControlHeight", "m_ChildScaleWidth", "m_ChildScaleHeight", "m_ReverseArrangement"],
@@ -1391,7 +1410,7 @@ func _override_component(kind: String, ctl: Control, uprops: Dictionary, obj: Re
 			if not graphic.is_empty():
 				Graphic.update(ctl, graphic)
 		"Button", "Toggle", "Slider", "Scrollbar", "InputField", "TMP_InputField", "Dropdown", "TMP_Dropdown":
-			_override_selectable(kind, ctl, uprops)
+			_override_selectable(kind, ctl, uprops, obj)
 		"ScrollRect":
 			var scroll: Dictionary = (ctl.get_meta(scroll_rect_script.META) as Dictionary).duplicate(true) if ctl.has_meta(scroll_rect_script.META) else {}
 			for entry in [["m_Horizontal", "horizontal"], ["m_Vertical", "vertical"], ["m_Inertia", "inertia"]]:
@@ -1573,7 +1592,7 @@ func _scene_root(n: Node) -> Node:
 	return o
 
 
-func _override_selectable(kind: String, ctl: Control, uprops: Dictionary) -> void:
+func _override_selectable(kind: String, ctl: Control, uprops: Dictionary, obj: RefCounted = null) -> void:
 	var cfg: Dictionary = (ctl.get_meta(selectable_script.META) as Dictionary).duplicate(true) if ctl.has_meta(selectable_script.META) else {"transition": 1}
 	if uprops.has("m_Interactable"):
 		var on: bool = _to_int(uprops["m_Interactable"]) != 0
@@ -1596,6 +1615,22 @@ func _override_selectable(kind: String, ctl: Control, uprops: Dictionary) -> voi
 		cfg["colors"] = block
 	if uprops.has("m_Direction") and kind in ["Slider", "Scrollbar"]:
 		cfg["direction"] = _to_int(uprops["m_Direction"])
+	for pair in SPRITE_STATES:
+		if obj != null and typeof(uprops.get("m_SpriteState." + pair[0])) == TYPE_ARRAY:
+			var sprites: Dictionary = (cfg.get("sprites", {}) as Dictionary).duplicate()
+			var swap: Texture2D = animation_sprite(uprops["m_SpriteState." + pair[0]], obj)
+			if swap != null:
+				sprites[pair[1]] = swap
+			else:
+				sprites.erase(pair[1])
+			cfg["sprites"] = sprites
+	for pair in ANIMATION_TRIGGERS:
+		if uprops.has("m_AnimationTriggers." + pair[0]):
+			var triggers: Dictionary = (cfg.get("triggers", {}) as Dictionary).duplicate()
+			triggers[pair[1]] = str(uprops["m_AnimationTriggers." + pair[0]])
+			cfg["triggers"] = triggers
+	if uprops.has("toggleTransition"):
+		cfg["toggle_fade"] = _to_int(uprops["toggleTransition"]) != 0
 	ctl.set_meta(selectable_script.META, cfg)
 	match kind:
 		"Toggle":

@@ -5,18 +5,26 @@ extends Node
 ## What a Unity Selectable does to other objects, for the Control this node is a child of
 ## (ui_integration.gd adds it as a helper child named "UnidotSelectable"):
 ##   * colour tint transition: the target graphic takes the colour of the selection state
-##     (normal, highlighted, pressed, selected, disabled);
-##   * Toggle: the check mark graphic is shown while the toggle is on;
+##     (normal, highlighted, pressed, selected, disabled), fading over the block's fadeDuration
+##     (Graphic.CrossFadeColor); a Selectable that appears has its colour at once;
+##   * sprite swap transition: the target Image draws the sprite of the state in place of its
+##     own (Image.overrideSprite);
+##   * animation transition: the Animator of the object gets the trigger of the state (the
+##     others reset), when the state changes;
+##   * Toggle: the check mark graphic is shown while the toggle is on (fading in 0.1 s when
+##     its transition is Fade);
 ##   * Slider: the fill and handle rects follow the value (their anchors, as Unity sets them);
 ##   * Scrollbar: the handle spans `size` of the bar and moves with the value
 ##     (Scrollbar.UpdateVisuals; size and direction in the `unidot_scrollbar` metadata), and
 ##     the pointer sets the value as Unity's Scrollbar does (the Godot ScrollBar underneath
 ##     draws nothing and its own handling is bypassed).
 ## The parent's `unidot_selectable` metadata holds the settings:
-##   {transition (0 none, 1 colour tint),
+##   {transition (0 none, 1 colour tint, 2 sprite swap, 3 animation),
 ##    colors: a ColorBlock {normalColor, highlightedColor, pressedColor, selectedColor,
 ##            disabledColor, colorMultiplier, fadeDuration},
-##    target: NodePath (the target graphic), graphic: NodePath (Toggle),
+##    sprites: {highlighted, pressed, selected, disabled: Texture2D},
+##    triggers: {normal, highlighted, pressed, selected, disabled: String},
+##    target: NodePath (the target graphic), graphic: NodePath (Toggle), toggle_fade: bool,
 ##    fill, handle: NodePath and direction (Slider: 0 left to right, 1 right to left,
 ##    2 bottom to top, 3 top to bottom), fill_image: bool (the fill is an Image of type Filled)}
 ## `refresh_static` applies the resting state without this node: the importer calls it, so the
@@ -37,6 +45,8 @@ const DEFAULT_COLORS := {
 var _host: Control = null
 var _inside: bool = false
 var _down: bool = false
+var _live: bool = false     # after the first refresh: what changes fades
+var _state: String = ""
 
 
 func _ready() -> void:
@@ -73,14 +83,18 @@ func _ready() -> void:
 			_down = false
 			refresh())
 	refresh()
+	_live = true
 
 
-## Selectable.OnEnable / OnDisable: the visuals are brought up to date, pointer state is forgotten.
+## Selectable.OnEnable / OnDisable: the visuals are brought up to date at once, pointer state is
+## forgotten.
 func _shown() -> void:
 	if not _host.is_visible_in_tree():
 		_inside = false
 		_down = false
+	_live = false
 	refresh()
+	_live = true
 
 
 ## Unity's selection state: disabled, pressed, selected (has the focus), highlighted, normal.
@@ -108,8 +122,14 @@ static func interactable(host: Control) -> bool:
 
 
 func refresh() -> void:
-	if _host != null:
-		apply(_host, selection_state())
+	if _host == null:
+		return
+	var now: String = selection_state()
+	var changed: bool = now != _state
+	_state = now
+	apply(_host, now, not _live)
+	if changed or not _live:
+		trigger_animation(_host, now)
 
 
 ## Bring what `host` drives up to date (after its value, colours or interactable changed).
@@ -148,27 +168,54 @@ static func part(host: Node, key: String) -> Node:
 	return null
 
 
-## Apply a selection state (and the toggle / slider visuals) to what `host` drives.
-static func apply(host: Control, sel_state: String) -> void:
+## Apply a selection state (and the toggle / slider visuals) to what `host` drives
+## (Selectable.DoStateTransition). `instant`: without the fades.
+static func apply(host: Control, sel_state: String, instant: bool = true) -> void:
 	if not host.has_meta(META):
 		return
 	var cfg: Dictionary = host.get_meta(META)
-	if int(cfg.get("transition", 1)) == 1:
-		var target: Node = part(host, "target")
-		if target != null:
-			var block: Dictionary = colors(host)
-			var tint: Color = block.get(sel_state + "Color", block["normalColor"])
-			var mul: float = float(block.get("colorMultiplier", 1.0))
-			# (the alpha is multiplied too, as in Unity)
-			Graphic.set_renderer_color(target, Color(tint.r * mul, tint.g * mul, tint.b * mul, tint.a * mul).clamp())
+	var target: Node = part(host, "target")
+	if target != null:
+		match int(cfg.get("transition", 1)):
+			1:
+				var block: Dictionary = colors(host)
+				var tint: Color = block.get(sel_state + "Color", block["normalColor"])
+				var mul: float = float(block.get("colorMultiplier", 1.0))
+				# (the alpha is multiplied too, as in Unity)
+				Graphic.cross_fade(target, Color(tint.r * mul, tint.g * mul, tint.b * mul, tint.a * mul).clamp(), 0.0 if instant else float(block.get("fadeDuration", 0.1)))
+			2:
+				var swap = (cfg.get("sprites", {}) as Dictionary).get(sel_state)
+				Graphic.set_override_sprite(target, swap as Texture2D)
 	if host is BaseButton:
 		var mark: Node = part(host, "graphic")
 		if mark != null:
-			Graphic.set_renderer_alpha(mark, 1.0 if host.button_pressed else 0.0)
+			# Toggle.PlayEffect
+			var fade: float = 0.1 if not instant and bool(cfg.get("toggle_fade", false)) else 0.0
+			Graphic.cross_fade(mark, Color(0, 0, 0, 1.0 if host.button_pressed else 0.0), fade, true, false)
 	if host is ScrollBar:
 		scrollbar_visuals(host)
 	elif host is Range:
 		_slider_visuals(host, cfg)
+
+
+## Selectable.TriggerAnimation: the Animator of the object (its AnimationTree, whose parameters
+## are metadata) gets the trigger of the state; the triggers of the other states are reset.
+static func trigger_animation(host: Control, sel_state: String) -> void:
+	var cfg: Dictionary = config(host)
+	if int(cfg.get("transition", 1)) != 3:
+		return
+	var triggers: Dictionary = cfg.get("triggers", {})
+	var trigger: String = str(triggers.get(sel_state, ""))
+	var tree: AnimationTree = null
+	for c in host.get_children():
+		if c is AnimationTree:
+			tree = c
+	if tree == null or not tree.active or trigger.is_empty():
+		return
+	for other in triggers.values():
+		if str(other) != "":
+			tree.set("metadata/" + str(other), false)
+	tree.set("metadata/" + trigger, true)
 
 
 ## Slider.UpdateVisuals: the fill is anchored from the start to the value, the handle at the value.

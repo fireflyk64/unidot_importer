@@ -91,6 +91,108 @@ static func set_renderer_alpha(ctl: Node, a: float) -> void:
 		update(ctl, {"renderer": r})
 
 
+const META_FADE := &"unidot_fade"
+
+## Graphic.CrossFadeColor (and CrossFadeAlpha: `use_rgb` false): the CanvasRenderer colour goes
+## from what it is to `target` in `duration` seconds. No duration, or a graphic outside the
+## tree: at once. (The fade that runs is kept in the graphic's `unidot_fade` metadata:
+## {tween, to}.)
+static func cross_fade(ctl: Node, target: Color, duration: float, use_alpha: bool = true, use_rgb: bool = true) -> void:
+	if ctl == null or not (use_alpha or use_rgb):
+		return
+	var from: Color = renderer_color(ctl)
+	var to: Color = Color(target.r if use_rgb else from.r, target.g if use_rgb else from.g, target.b if use_rgb else from.b, target.a if use_alpha else from.a)
+	var running: Tween = fade_of(ctl)
+	if running != null and duration > 0.0 and ((ctl.get_meta(META_FADE) as Dictionary)["to"] as Color) == to:
+		return   # on its way there
+	if running != null:
+		running.kill()
+	if ctl.has_meta(META_FADE):
+		ctl.remove_meta(META_FADE)
+	if duration <= 0.0 or from == to or not ctl.is_inside_tree():
+		set_renderer_color(ctl, to)
+		return
+	var tween: Tween = ctl.create_tween()
+	tween.set_ignore_time_scale(true)
+	tween.tween_method(func(t: float) -> void: update(ctl, {"renderer": from.lerp(to, t)}), 0.0, 1.0, duration)
+	# (the callback knows the tween by its id: holding it would keep it alive for ever)
+	var id: int = tween.get_instance_id()
+	tween.finished.connect(func() -> void:
+		if ctl.has_meta(META_FADE) and ((ctl.get_meta(META_FADE) as Dictionary)["tween"] as Tween).get_instance_id() == id:
+			ctl.remove_meta(META_FADE))
+	ctl.set_meta(META_FADE, {"tween": tween, "to": to})
+
+
+## The fade a graphic is in, if any.
+static func fade_of(ctl: Node) -> Tween:
+	if ctl == null or not ctl.has_meta(META_FADE):
+		return null
+	var tween: Tween = (ctl.get_meta(META_FADE) as Dictionary).get("tween") as Tween
+	return tween if tween != null and tween.is_valid() else null
+
+
+const META_OWN_SPRITE := &"unidot_sprite_own"
+const WHITE := preload("./ui_white.tres")
+
+## Image.sprite: the sprite of the Image itself (another one may be drawn in its place:
+## `set_override_sprite`).
+static func sprite(ctl: Node) -> Texture2D:
+	if ctl == null:
+		return null
+	if ctl.has_meta(META_OWN_SPRITE):
+		return (ctl.get_meta(META_OWN_SPRITE) as Dictionary).get("texture") as Texture2D
+	return _drawn_sprite(ctl)
+
+
+static func set_sprite(ctl: Node, tex: Texture2D) -> void:
+	if ctl == null:
+		return
+	if ctl.has_meta(META_OWN_SPRITE):
+		ctl.set_meta(META_OWN_SPRITE, {"texture": tex})
+	else:
+		_draw_sprite(ctl, tex)
+
+
+## Image.overrideSprite: drawn in place of the Image's sprite until it is null again (the
+## sprite swap of a Selectable).
+static func set_override_sprite(ctl: Node, tex: Texture2D) -> void:
+	if ctl == null:
+		return
+	if tex == null:
+		if ctl.has_meta(META_OWN_SPRITE):
+			var own: Texture2D = (ctl.get_meta(META_OWN_SPRITE) as Dictionary).get("texture") as Texture2D
+			ctl.remove_meta(META_OWN_SPRITE)
+			_draw_sprite(ctl, own)
+		return
+	if not ctl.has_meta(META_OWN_SPRITE):
+		ctl.set_meta(META_OWN_SPRITE, {"texture": _drawn_sprite(ctl)})
+	_draw_sprite(ctl, tex)
+
+
+static func _drawn_sprite(ctl: Node) -> Texture2D:
+	if ctl is TextureRect:
+		return null if bool(ctl.get_meta(&"unidot_no_sprite", false)) else ctl.texture
+	return state(ctl).get("texture") as Texture2D
+
+
+## (an Image without a sprite is a rectangle in its colour: a white texture; a sprite that is
+## sliced brings its own border)
+static func _draw_sprite(ctl: Node, tex: Texture2D) -> void:
+	var changes: Dictionary = {}
+	var drawing = state(ctl).get("sprite")
+	if tex != null and tex.has_meta(&"unidot_sprite") and drawing is Dictionary:
+		var changed: Dictionary = (drawing as Dictionary).duplicate()
+		changed["border"] = (tex.get_meta(&"unidot_sprite") as Dictionary).get("border", changed.get("border", [0, 0, 0, 0]))
+		changes["sprite"] = changed
+	if ctl is TextureRect:
+		ctl.texture = tex if tex != null else WHITE
+		ctl.set_meta(&"unidot_no_sprite", tex == null)
+	else:
+		changes["texture"] = tex
+	update(ctl, changes)
+
+
+
 ## The colour the graphic ends up with (alpha 0 when it is not drawn).
 static func drawn_color(ctl: Node) -> Color:
 	var s: Dictionary = state(ctl)
