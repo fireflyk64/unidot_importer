@@ -13,10 +13,13 @@ extends SceneTree
 ## elsewhere than its transform says (snapping, stale canvas items), which no check of
 ## transforms can see. Sampled are five points of every solid-colour graphic, nine of every
 ## stretched sprite and twenty-five of every sliced, tiled or filled one (where its texture is
-## opaque and even, mapped through the slices as Unity builds them; where such a sprite draws
-## nothing, what lies behind must show) that no other graphic covers; under a text the pixel
-## may be anything between the graphic's colour and the text's. A graphic is reported when
-## most of its points show something else.
+## even, mapped through the slices as Unity builds them; where such a sprite draws nothing,
+## what lies behind must show) that no other graphic covers; under a text the pixel may be
+## anything between the graphic's colour and the text's. A translucent graphic must show its
+## colour blended over what is drawn below it (the canvas itself is transparent: the picture
+## holds colours multiplied by their alpha). A graphic is reported when most of its points
+## show something else. A text must show its colour somewhere in its rect: glyphs are not
+## compared, but a text that is not drawn, or drawn elsewhere, is reported.
 ## --static 1: scripts that are not unidot's own are removed first (the scene as imported).
 ## --all 1: every UI object is made visible first (menus that a script shows later are rendered
 ## and checked too; they may overlap).
@@ -77,7 +80,7 @@ func _init() -> void:
 	if check:
 		for p in problems.slice(0, 40):
 			print("  MISDRAWN " + str(p))
-		print("[ui_shots] pixel check: %d points on %d of %d graphics, %d not drawn where the transforms put them" % [points, graphics_checked, graphics_seen, problems.size()])
+		print("[ui_shots] pixel check: %d points on %d of %d graphics (%d of them blends), %d of %d texts, %d not drawn where the transforms put them" % [points, graphics_checked, graphics_seen, translucent, texts_checked, texts_seen, problems.size()])
 	quit(1 if check and (not problems.is_empty() or points == 0) else 0)
 
 
@@ -105,7 +108,7 @@ func _find(n: Node, out: Array) -> void:
 
 
 ## What a control draws at its rect: [kind, colour, texture, sprite]. kind 0 nothing, 1 one
-## opaque colour, 2 something that is not compared (a translucent colour, another canvas, a
+## colour (opaque or translucent), 2 something that is not compared (another canvas, a
 ## widget), 3 a texture stretched over the rect and multiplied by the colour, 4 text in that
 ## colour, 5 a sliced / tiled / filled sprite (drawn by the helper child, runtime/ui_sprite.gd).
 func _drawn(c: Control, fade: Color) -> Array:
@@ -122,7 +125,7 @@ func _drawn(c: Control, fade: Color) -> Array:
 		if tint.a <= 0.004:
 			return [0, Color.WHITE]
 		if stex == null:
-			return [1 if tint.a >= 0.996 else 2, tint]   # a rectangle in the Image's colour
+			return [1, tint]   # a rectangle in the Image's colour
 		return [5, tint, stex, state.get("sprite", {})]
 	if c is TextureRect:
 		if c.texture == null:
@@ -137,6 +140,8 @@ func _drawn(c: Control, fade: Color) -> Array:
 	elif c is ColorRect:
 		col = c.color
 	elif c is RichTextLabel or c is Label:
+		if c is RichTextLabel and c.visible_characters == 0:
+			return [0, Color.WHITE]   # (its text is drawn by a child: runtime/ui_text.gd)
 		var text_color: Color = c.get_theme_color("default_color" if c is RichTextLabel else "font_color") * c.self_modulate * fade
 		return [4 if text_color.a > 0.004 else 0, text_color]
 	elif c is LineEdit or c is OptionButton or c is Slider or c is ScrollBar:
@@ -160,7 +165,7 @@ func _drawn(c: Control, fade: Color) -> Array:
 	col = col * fade
 	if col.a <= 0.004:
 		return [0, col]
-	return [1 if col.a >= 0.996 else 2, col]
+	return [1, col]
 
 
 ## Draw order of the controls of one viewport: [control, transform to viewport pixels, kind,
@@ -287,16 +292,79 @@ func _draws_at(item: Array, p: Vector2) -> bool:
 
 var graphics_seen: int = 0
 var graphics_checked: int = 0
+var translucent: int = 0      # points whose colour is a blend
+var texts_seen: int = 0
+var texts_checked: int = 0
 
 func _rgb_error(a: Color, b: Color) -> float:
 	return maxf(maxf(absf(a.r - b.r), absf(a.g - b.g)), absf(a.b - b.b))
 
 
-## Is `px` the colour `want`, or something between it and one of the text colours drawn over it?
+## `src` (straight alpha) drawn over `dst` (multiplied by its alpha, as the picture of a
+## transparent viewport holds it).
+func _over(dst: Color, src: Color) -> Color:
+	var k: float = 1.0 - src.a
+	return Color(src.r * src.a + dst.r * k, src.g * src.a + dst.g * k, src.b * src.a + dst.b * k, src.a + dst.a * k)
+
+
+## The colour (straight alpha) the item draws at the viewport point `p`, or null when that
+## cannot be told (an uneven texture, a widget).
+func _colour_at(item: Array, p: Vector2):
+	var c: Control = item[0]
+	var xf: Transform2D = item[1]
+	match int(item[2]):
+		1:
+			return item[3]
+		3:
+			var on_screen := Vector2(xf.basis_xform(Vector2(c.size.x, 0.0)).length(), xf.basis_xform(Vector2(0.0, c.size.y)).length())
+			if on_screen.x < 1.0 or on_screen.y < 1.0 or c.size.x <= 0.0 or c.size.y <= 0.0:
+				return null
+			var texel = _even_texel(item[5], (xf.affine_inverse() * p) / c.size, Vector2(1.0 / on_screen.x, 1.0 / on_screen.y))
+			return null if texel == null else (texel as Color) * (item[3] as Color)
+		5:
+			var im: Image = _texture_image(Sprite.source(item[5])[0])
+			var at = _sprite_pixel(c, item[5], item[6], xf.affine_inverse() * p)
+			var even = _even_pixel(im, at, 3, 3) if im != null and at != null else null
+			return null if even == null else (even as Color) * (item[3] as Color)
+	return null
+
+
+## What the picture shows at `p`: every graphic that draws there, from the last opaque one up,
+## each over what is below (multiplied by alpha: nothing is transparent black). → [colour,
+## colours of the texts drawn over the topmost graphic, index of that graphic, is the topmost
+## graphic translucent there], or [] when a layer cannot be told.
+func _expected(items: Array, p: Vector2, among = null) -> Array:
+	var acc := Color(0, 0, 0, 0)
+	var texts: Array = []
+	var top: int = -1
+	var blended: bool = false
+	for j in (among if among != null else range(items.size())):
+		if not _draws_at(items[j], p):
+			continue
+		if int(items[j][2]) == 4:
+			texts.append(items[j][3])
+			continue
+		var col = _colour_at(items[j], p)
+		if col == null:
+			acc = Color(0, 0, 0, -1.0)   # unknown from here on, until something opaque covers it
+		elif acc.a < 0.0 and (col as Color).a < 0.996:
+			pass
+		else:
+			blended = (col as Color).a < 0.996
+			acc = _over(acc if acc.a >= 0.0 else Color(0, 0, 0, 0), col)
+		top = j
+		texts = []
+	if acc.a < 0.0:
+		return []
+	return [acc, texts, top, blended]
+
+
+## Is `px` the colour `want` (both multiplied by alpha), or something between it and one of
+## the text colours drawn over it?
 func _shows(px: Color, want: Color, texts: Array, tolerance: float) -> bool:
-	if absf(px.a - 1.0) > tolerance:
+	if absf(px.a - want.a) > tolerance and texts.is_empty():
 		return false
-	if _rgb_error(px, want) <= tolerance:
+	if _rgb_error(px, want) <= tolerance and absf(px.a - want.a) <= tolerance:
 		return true
 	for tc in texts:
 		var d := Vector3(tc.r - want.r, tc.g - want.g, tc.b - want.b)
@@ -345,43 +413,28 @@ func _check(vp: SubViewport, img: Image, canvas: String, problems: Array) -> int
 			# (three pixels around the edge of a radial fill)
 			if item[2] == 5 and _at_fill_edge(c, item[6], c.size * frac, Vector2(3.0 / on_screen.x, 3.0 / on_screen.y)):
 				continue
-			# the topmost graphic at the point (later in the tree is drawn later) and the texts
-			# drawn over it
-			var top: int = -1
-			var texts: Array = []
-			for j in range(items.size()):
-				if not _draws_at(items[j], p):
-					continue
-				if items[j][2] == 4:
-					texts.append(items[j][3])
-				else:
-					top = j
-					texts = []
+			# what the graphics at the point add up to (later in the tree is drawn later), the
+			# topmost of them and the texts drawn over it
+			var stack: Array = _expected(items, p)
+			if stack.is_empty():
+				continue
+			var top: int = stack[2]
+			var texts: Array = stack[1]
 			var want = null
-			var tolerance: float = 0.06
+			var tolerance: float = 0.06 if item[2] == 1 else 0.1
 			var shown_by: Control = c
 			if top == index:
-				if item[2] == 1:
-					want = item[3]
-				elif item[2] == 3:
-					var texel = _even_texel(item[5], frac, Vector2(1.0 / on_screen.x, 1.0 / on_screen.y))
-					if texel != null:
-						want = (texel as Color) * (item[3] as Color)
-						tolerance = 0.1
-				else:
-					var im: Image = _texture_image(Sprite.source(item[5])[0])
-					var at = _sprite_pixel(c, item[5], item[6], c.size * frac)
-					var even = _even_pixel(im, at, 3, 3) if im != null and at != null else null
-					if even != null:
-						want = (even as Color) * (item[3] as Color)
-						tolerance = 0.1
+				want = stack[0]
 			elif item[2] == 5 and not _draws_at(item, p) and _inside(c, xf, p):
 				# a hole of the sprite (no centre, the unfilled part): what lies behind shows
-				if top >= 0 and items[top][2] == 1:
-					want = items[top][3]
+				if top >= 0:
+					want = stack[0]
 					shown_by = items[top][0]
-			if want == null or (want as Color).a < 0.996:
+			if want == null:
 				continue
+			if bool(stack[3]) or (want as Color).a < 0.996:
+				translucent += 1
+				tolerance = maxf(tolerance, 0.08)
 			sampled += 1
 			var shown: bool = false
 			var got := Color()
@@ -401,4 +454,90 @@ func _check(vp: SubViewport, img: Image, canvas: String, problems: Array) -> int
 			graphics_checked += 1
 		if misdrawn * 2 > sampled or (item[2] == 5 and misdrawn > 0):
 			problems.append("%s :: %s: %d of %d points; %s" % [canvas, str(vp.get_child(0).get_path_to(c)), misdrawn, sampled, first])
+	_check_texts(vp, img, canvas, items, problems)
 	return points
+
+
+## The rect of a control in the picture (the box around its corners).
+func _bounds(c: Control, xf: Transform2D) -> Rect2:
+	var box := Rect2(xf * Vector2.ZERO, Vector2.ZERO)
+	for corner in [Vector2(c.size.x, 0.0), c.size, Vector2(0.0, c.size.y)]:
+		box = box.expand(xf * corner)
+	return box
+
+
+## A text must be drawn where its transform puts it: somewhere in its rect the picture shows
+## its colour (glyph by glyph is not compared: that would need the font's rasterizer). Looked
+## at are texts of one opaque colour, high enough on screen to have whole pixels in their
+## strokes, that fit their rect, where nothing is drawn over them and the colour below is
+## known and different.
+func _check_texts(vp: SubViewport, img: Image, canvas: String, items: Array, problems: Array) -> void:
+	for index in range(items.size()):
+		var item: Array = items[index]
+		if int(item[2]) != 4 or not (item[0] is RichTextLabel):
+			continue
+		texts_seen += 1
+		var label: RichTextLabel = item[0]
+		var xf: Transform2D = item[1]
+		var colour: Color = item[3]
+		if colour.a < 0.996 or label.visible_characters == 0 or label.get_parsed_text().strip_edges().is_empty():
+			continue
+		if label.text.contains("[color") or label.text.contains("[img") or label.size.x < 1.0 or label.size.y < 1.0:
+			continue
+		var scale := Vector2(xf.basis_xform(Vector2(1.0, 0.0)).length(), xf.basis_xform(Vector2(0.0, 1.0)).length())
+		if float(label.get_theme_font_size("normal_font_size")) * scale.y < 10.0:
+			continue
+		# (a text that runs out of its rect is drawn by a child, which is looked at instead)
+		if float(label.get_content_height()) > label.size.y + 1.0 or float(label.get_content_width()) > label.size.x + 1.0:
+			continue
+		var on_screen: Vector2 = label.size * scale
+		var step: float = maxf(1.0, sqrt(on_screen.x * on_screen.y / 3000.0))
+		# what may be drawn below and above the text: the items whose rects meet its rect
+		var bounds: Rect2 = _bounds(label, xf)
+		var below_items: Array = []
+		var above_items: Array = []
+		for j in range(items.size()):
+			if j == index or int(items[j][2]) == 0 or not bounds.intersects(_bounds(items[j][0], items[j][1])):
+				continue
+			if j < index:
+				below_items.append(j)
+			elif not label.is_ancestor_of(items[j][0]):
+				above_items.append(j)
+		var looked: int = 0
+		var hits: int = 0
+		var y: float = 0.5
+		while y < on_screen.y and hits < 3:
+			var x: float = 0.5
+			while x < on_screen.x and hits < 3:
+				var p: Vector2 = xf * (Vector2(x, y) / scale)
+				x += step
+				if p.x < 0.0 or p.y < 0.0 or p.x >= img.get_width() or p.y >= img.get_height() or not _draws_at(item, p):
+					continue
+				# nothing drawn over the text here, and a known colour below it
+				var covered: bool = false
+				for j in above_items:
+					if _draws_at(items[j], p):
+						covered = true
+						break
+				if covered:
+					continue
+				var below: Array = _expected(items, p, below_items)
+				if below.is_empty() or not (below[1] as Array).is_empty():
+					continue
+				var back: Color = below[0]
+				var want: Color = _over(back, colour)
+				if _rgb_error(back, want) < 0.25:
+					continue
+				looked += 1
+				var px: Color = img.get_pixel(int(p.x), int(p.y))
+				# more than half of the way from what is below to the text's colour
+				var d := Vector3(want.r - back.r, want.g - back.g, want.b - back.b)
+				var t: float = Vector3(px.r - back.r, px.g - back.g, px.b - back.b).dot(d) / d.length_squared()
+				if t > 0.5 and _rgb_error(px, back.lerp(want, clampf(t, 0.0, 1.0))) <= 0.12:
+					hits += 1
+			y += step
+		if looked < 50:
+			continue
+		texts_checked += 1
+		if hits < 3:
+			problems.append("%s :: %s: the text '%s' does not show in its rect (%d pixels looked at, colour %s)" % [canvas, str(vp.get_child(0).get_path_to(label)), label.get_parsed_text().substr(0, 24), looked, str(colour)])
