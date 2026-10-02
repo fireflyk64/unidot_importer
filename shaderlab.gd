@@ -184,6 +184,42 @@ static func sky_kind(info: Dictionary, texs: Dictionary, floats: Dictionary, col
 	return ""
 
 
+## Is a custom shader a replacement for Unity's Standard shader: the same properties with
+## another lighting model behind them (Filamented, and the like)? Its materials are what a
+## Standard material is, and convert as one.
+static func is_standard_replacement(info: Dictionary) -> bool:
+	var props: Dictionary = info.get("properties", {})
+	for needed in ["_Color", "_MainTex", "_Metallic", "_Glossiness", "_BumpMap", "_OcclusionMap", "_EmissionColor", "_Mode", "_SrcBlend", "_DstBlend", "_ZWrite"]:
+		if not props.has(needed):
+			return false
+	return true
+
+
+## The further passes of a shader port: `<name>.pass1.gdshader`, `<name>.pass2.gdshader` ...
+## beside `<name>.gdshader`, each drawn after the one before (a material's next_pass). A pass
+## that is drawn several times with one uniform changing (the shells of a fur shader) says so
+## in a comment: `// unidot_repeat: <uniform> = <value>, <value>, ...`
+## → [[path, uniform name or "", value], ...] in drawing order.
+static func port_passes(port: String) -> Array:
+	var out: Array = []
+	var index: int = 1
+	while index < 64:
+		var path: String = port.get_basename() + ".pass%d.gdshader" % index
+		if not FileAccess.file_exists(path):
+			break
+		var re := RegEx.new()
+		re.compile("unidot_repeat:\\s*(\\w+)\\s*=\\s*([-0-9.,\\s]+)")
+		var found: RegExMatch = re.search(FileAccess.get_file_as_string(path))
+		if found == null:
+			out.append([path, "", 0.0])
+		else:
+			for value in found.get_string(2).split(","):
+				if value.strip_edges() != "":
+					out.append([path, found.get_string(1), value.strip_edges().to_float()])
+		index += 1
+	return out
+
+
 static func port_file_name(shader_name: String) -> String:
 	var s := shader_name.strip_edges().replace("/", "__").replace(" ", "_")
 	var re := RegEx.new()

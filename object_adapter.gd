@@ -855,6 +855,20 @@ class UnidotMaterial:
 		ret.resource_name = self.name
 		ret.shader = shader
 		shaderlab.apply_port_uniforms(ret, texProperties, floatProperties, colorProperties, func(pname: String) -> Texture: return get_texture(texProperties, pname))
+		# the further passes of the Unity shader: materials drawn after this one
+		var last: ShaderMaterial = ret
+		for further in shaderlab.port_passes(port):
+			var pass_shader: Shader = load(further[0])
+			if pass_shader == null:
+				log_warn("Failed to load a pass of the shader port: " + str(further[0]))
+				continue
+			var pass_material := ShaderMaterial.new()
+			pass_material.shader = pass_shader
+			shaderlab.apply_port_uniforms(pass_material, texProperties, floatProperties, colorProperties, func(pname: String) -> Texture: return get_texture(texProperties, pname))
+			if str(further[1]) != "":
+				pass_material.set_shader_parameter(str(further[1]), float(further[2]))
+			last.next_pass = pass_material
+			last = pass_material
 		assign_object_meta(ret)
 		log_debug("Material uses shader port " + port)
 		return ret
@@ -1074,7 +1088,10 @@ class UnidotMaterial:
 		#	ret.detail_blend_mode = BaseMaterial3D.BLEND_MODE_MUL
 		if not info.is_empty():
 			var applied: String = shaderlab.apply_render_state(ret, info, floatProperties, kws)
-			if not info.get("builtin", false):
+			if not info.get("builtin", false) and shaderlab.is_standard_replacement(info):
+				# (the Standard shader with another lighting model: this is its conversion)
+				log_debug("custom shader \"" + str(info.get("name", "")) + "\" is a replacement of Standard" + (" (" + applied + ")" if applied != "" else ""))
+			elif not info.get("builtin", false):
 				log_warn("custom shader \"" + str(info.get("name", "")) + "\" has no Godot port (expected " + shaderlab.port_file_name(str(info.get("name", ""))) + " in unidot/shader_ports); approximated with StandardMaterial3D" + (" (" + applied + ")" if applied != "" else ""), "m_Shader", shader_ref())
 		elif shader_ref()[1] != 0 and str(shader_ref()[2]) != shaderlab.BUILTIN_GUID:
 			log_warn("shader " + str(shader_ref()[2]) + " is not in the package; converted as Standard", "m_Shader", shader_ref())
@@ -6328,6 +6345,82 @@ class UnidotAudioClip:
 		return null
 
 
+## A LineRenderer: a MeshInstance3D named after the component that draws the line through its
+## positions as a strip of line segments, coloured from the first colour of its gradient to the
+## last. The Unity values are kept in the `unidot_line` metadata ({positions (Unity's: x to the
+## left of Godot's), world_space, loop, width, start_color, end_color}) for whatever redraws
+## the line when a script moves its points. Not drawn: the line's width (the segments are one
+## pixel wide), its material and texture.
+class UnidotLineRenderer:
+	extends UnidotBehaviour
+
+	func get_godot_type() -> String:
+		return "MeshInstance3D"
+
+	func create_godot_node(state: RefCounted, new_parent: Node) -> Node:
+		var line := MeshInstance3D.new()
+		line.name = "LineRenderer"
+		line.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		assign_object_meta(line)
+		state.add_child(line, new_parent, self)
+		return line
+
+	static func line_mesh(info: Dictionary) -> ArrayMesh:
+		var positions: Array = info.get("positions", [])
+		if positions.size() < 2:
+			return null
+		var vertices := PackedVector3Array()
+		var colors := PackedColorArray()
+		var count: int = positions.size() + (1 if bool(info.get("loop", false)) else 0)
+		for i in range(count):
+			var p: Vector3 = positions[i % positions.size()]
+			vertices.append(Vector3(-p.x, p.y, p.z))
+			colors.append((info.get("start_color", Color.WHITE) as Color).lerp(info.get("end_color", Color.WHITE), float(i) / float(maxi(count - 1, 1))))
+		var arrays: Array = []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = vertices
+		arrays[Mesh.ARRAY_COLOR] = colors
+		var mesh := ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINE_STRIP, arrays)
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.vertex_color_use_as_albedo = true
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mesh.surface_set_material(0, material)
+		return mesh
+
+	func convert_properties(node: Node, uprops: Dictionary) -> Dictionary:
+		var outdict = self.convert_properties_component(node, uprops)
+		var info: Dictionary = (node.get_meta(&"unidot_line") as Dictionary).duplicate(true) if node != null and node.has_meta(&"unidot_line") else {
+			"positions": [], "world_space": true, "loop": false, "width": 1.0, "start_color": Color.WHITE, "end_color": Color.WHITE}
+		if uprops.get("m_Positions") is Array:
+			info["positions"] = (uprops["m_Positions"] as Array).filter(func(p) -> bool: return p is Vector3)
+		if uprops.has("m_UseWorldSpace"):
+			info["world_space"] = int(uprops["m_UseWorldSpace"]) != 0
+		if uprops.has("m_Loop"):
+			info["loop"] = int(uprops["m_Loop"]) != 0
+		var parameters = uprops.get("m_Parameters")
+		if parameters is Dictionary:
+			info["width"] = float(parameters.get("widthMultiplier", 1.0))
+			var gradient = parameters.get("colorGradient")
+			if gradient is Dictionary:
+				# (key N holds the colour of the Nth colour key and the alpha of the Nth alpha key)
+				var first = gradient.get("key0")
+				var last_color = gradient.get("key%d" % maxi(int(gradient.get("m_NumColorKeys", 2)) - 1, 0))
+				var last_alpha = gradient.get("key%d" % maxi(int(gradient.get("m_NumAlphaKeys", 2)) - 1, 0))
+				if first is Color:
+					info["start_color"] = first
+				if last_color is Color:
+					info["end_color"] = Color(last_color.r, last_color.g, last_color.b, last_alpha.a if last_alpha is Color else last_color.a)
+		outdict["metadata/unidot_line"] = info
+		outdict["mesh"] = line_mesh(info)
+		# positions of the world are drawn where they are, whatever the object does
+		outdict["top_level"] = bool(info["world_space"])
+		if bool(info["world_space"]):
+			outdict["transform"] = Transform3D.IDENTITY
+		return outdict
+
+
 class UnidotAudioSource:
 	extends UnidotBehaviour
 
@@ -8049,7 +8142,7 @@ var _type_dictionary: Dictionary = {
 	"LightProbeGroup": UnidotLightProbeGroup,
 	# "LightProbeProxyVolume": UnidotLightProbeProxyVolume,
 	# "LightProbes": UnidotLightProbes,
-	# "LineRenderer": UnidotLineRenderer,
+	"LineRenderer": UnidotLineRenderer,
 	# "LocalizationAsset": UnidotLocalizationAsset,
 	# "LocalizationImporter": UnidotLocalizationImporter,
 	"LODGroup": UnidotLODGroup,

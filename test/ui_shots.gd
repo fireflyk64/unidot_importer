@@ -504,6 +504,7 @@ func _check_texts(vp: SubViewport, img: Image, canvas: String, items: Array, pro
 			elif not label.is_ancestor_of(items[j][0]):
 				above_items.append(j)
 		var looked: int = 0
+		var inside: int = 0
 		var hits: int = 0
 		var y: float = 0.5
 		while y < on_screen.y and hits < 3:
@@ -513,6 +514,7 @@ func _check_texts(vp: SubViewport, img: Image, canvas: String, items: Array, pro
 				x += step
 				if p.x < 0.0 or p.y < 0.0 or p.x >= img.get_width() or p.y >= img.get_height() or not _draws_at(item, p):
 					continue
+				inside += 1
 				# nothing drawn over the text here, and a known colour below it
 				var covered: bool = false
 				for j in above_items:
@@ -536,7 +538,8 @@ func _check_texts(vp: SubViewport, img: Image, canvas: String, items: Array, pro
 				if t > 0.5 and _rgb_error(px, back.lerp(want, clampf(t, 0.0, 1.0))) <= 0.12:
 					hits += 1
 			y += step
-		if looked < 50:
+		# (a text that is mostly covered, or over something unknown: its glyphs may all be there)
+		if looked < 50 or (hits < 3 and looked * 10 < inside * 8):
 			continue
 		texts_checked += 1
 		if hits < 3:

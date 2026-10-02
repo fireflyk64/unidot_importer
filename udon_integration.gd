@@ -108,6 +108,11 @@ func handle_monobehaviour(obj: RefCounted, state: RefCounted, node: Node, _exist
 	if guid_to_class.has(guid):
 		_attach_script(obj, state, node, manifest[guid_to_class[guid]])
 		return null
+	var vrc_constraint: String = _vrc_constraint_kind(keys)
+	if vrc_constraint != "":
+		_handle_vrc_constraint(vrc_constraint, obj, node)
+		state.add_fileID(node, obj)
+		return null
 	var kind: String = _identify_component(guid, keys, _to_int(obj.monoscript[1]))
 	if kind == "":
 		# Unity UI components belong to unidot's own UI conversion
@@ -1006,6 +1011,103 @@ func handle_constraint(kind: String, obj: RefCounted, _state: RefCounted, node: 
 			node.set_meta(meta_key, now)
 	var counts: Dictionary = _report["components"]
 	counts["Constraint (" + kind + ")"] = int(counts.get("Constraint (" + kind + ")", 0)) + 1
+
+
+## VRChat's own constraint components (VRC.SDK3.Dynamics.Constraint: VRCPositionConstraint,
+## VRCRotationConstraint, VRCScaleConstraint, VRCParentConstraint, VRCAimConstraint,
+## VRCLookAtConstraint) live in an SDK library: they are told by their fields. → the kind of
+## the constraint as handle_constraint names it, or "".
+func _vrc_constraint_kind(keys: Dictionary) -> String:
+	if not (keys.get("Sources") is Dictionary) or not keys.has("GlobalWeight") or not keys.has("Locked"):
+		return ""
+	if keys.has("AimAxis"):
+		return "aim"
+	if keys.has("Roll") or keys.has("UseUpTransform"):
+		return "lookat"
+	if keys.has("ScaleOffset") or keys.has("AffectsScaleX"):
+		return "scale"
+	if keys.has("AffectsPositionX") and keys.has("AffectsRotationX"):
+		return "parent"
+	if keys.has("AffectsPositionX"):
+		return "position"
+	if keys.has("AffectsRotationX"):
+		return "rotation"
+	return ""
+
+
+## A VRChat constraint component → the node's `udon_constraint` metadata (see
+## handle_constraint), under the names the scripts' VRC constraint API reads from the store:
+## positionOffset, rotationOffset, affectPX ..., aimAxis, worldUp, the sources' parent offsets
+## as translationOffsets / rotationOffsets, "target_<constraint>" for a TargetTransform.
+func _handle_vrc_constraint(kind: String, obj: RefCounted, node: Node) -> void:
+	var keys: Dictionary = obj.keys
+	var meta_key: String = "udon_constraint"
+	var cfg: Dictionary = (node.get_meta(meta_key) as Dictionary).duplicate(true) if node.has_meta(meta_key) else {"list": []}
+	var list: Array = cfg["list"]
+	var index: int = list.size()
+	var c: Dictionary = {
+		"kind": kind,
+		"active": _to_int(keys.get("IsActive", 1)) != 0 and _to_int(keys.get("m_Enabled", 1)) != 0,
+		"weight": _to_float(keys.get("GlobalWeight", 1.0)),
+		"locked": _to_int(keys.get("Locked", 0)) != 0,
+		"freeze": _to_int(keys.get("FreezeToWorld", 0)) != 0,
+		"rebake": _to_int(keys.get("RebakeOffsetsWhenUnfrozen", 0)) != 0,
+		"local": _to_int(keys.get("SolveInLocalSpace", 0)) != 0,
+	}
+	for pair in [["PositionAtRest", "positionAtRest"], ["PositionOffset", "positionOffset"], ["RotationAtRest", "rotationAtRest"], ["RotationOffset", "rotationOffset"],
+			["ScaleAtRest", "scaleAtRest"], ["ScaleOffset", "scaleOffset"], ["AimAxis", "aimAxis"], ["UpAxis", "upAxis"], ["WorldUpVector", "worldUp"]]:
+		if keys.get(pair[0]) is Vector3:
+			c[pair[1]] = keys[pair[0]]
+	for pair in [["AffectsPosition", "affectP"], ["AffectsRotation", "affect"], ["AffectsScale", "affectS"]]:
+		for axis in ["X", "Y", "Z"]:
+			if keys.has(pair[0] + axis):
+				c[pair[1] + axis] = _to_int(keys[pair[0] + axis]) != 0
+	if keys.has("WorldUp"):
+		c["worldUpType"] = _to_int(keys["WorldUp"])
+	if keys.has("Roll"):
+		c["roll"] = _to_float(keys["Roll"])
+	if keys.has("UseUpTransform"):
+		c["useUp"] = _to_int(keys["UseUpTransform"]) != 0
+	# the sources: sixteen fields that an animation can key, then a list; totalLength of them count
+	var sources: Dictionary = keys["Sources"]
+	var entries: Array = []
+	for i in range(16):
+		if sources.get("source%d" % i) is Dictionary:
+			entries.append(sources["source%d" % i])
+	if sources.get("overflowList") is Array:
+		for extra in sources["overflowList"]:
+			if extra is Dictionary:
+				entries.append(extra)
+	if sources.has("totalLength"):
+		entries = entries.slice(0, maxi(_to_int(sources["totalLength"]), 0))
+	var weights: Array = []
+	var offsets_p: Array = []
+	var offsets_r: Array = []
+	var pending: Array = []
+	for src in entries:
+		pending.append(["src_%d_%d" % [index, weights.size()], src.get("SourceTransform")])
+		weights.append(_to_float(src.get("Weight", 1.0)))
+		offsets_p.append(src["ParentPositionOffset"] if src.get("ParentPositionOffset") is Vector3 else Vector3.ZERO)
+		offsets_r.append(src["ParentRotationOffset"] if src.get("ParentRotationOffset") is Vector3 else Vector3.ZERO)
+	c["weights"] = weights
+	if kind == "parent":
+		c["translationOffsets"] = offsets_p
+		c["rotationOffsets"] = offsets_r
+	if keys.has("WorldUpTransform"):
+		pending.append(["up_%d" % index, keys["WorldUpTransform"]])
+	if keys.has("TargetTransform"):
+		pending.append(["target_%d" % index, keys["TargetTransform"]])
+	list.append(c)
+	node.set_meta(meta_key, cfg)
+	node.add_to_group(meta_key, true)
+	for entry in pending:
+		var np: NodePath = _nodepath_for_ref(entry[1], obj, node, meta_key, entry[0])
+		if np != NodePath():
+			var now: Dictionary = (node.get_meta(meta_key) as Dictionary).duplicate(true)
+			now[entry[0]] = np
+			node.set_meta(meta_key, now)
+	var counts: Dictionary = _report["components"]
+	counts["VRC constraint (" + kind + ")"] = int(counts.get("VRC constraint (" + kind + ")", 0)) + 1
 
 
 func _component_meta_key(kind: String) -> String:

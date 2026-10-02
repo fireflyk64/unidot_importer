@@ -15,9 +15,12 @@ func _find_animation_node(np: NodePath) -> AnimationNode:
 	var node: AnimationNode = tree_root
 	for idx in range(1, np.get_name_count() - 1):
 		if node is AnimationNodeBlendTree:
+			# (a parameter path that is not of this tree: whoever asks tries several)
+			if not node.has_node(np.get_name(idx)):
+				return null
 			node = node.get_node(np.get_name(idx))
 		elif node is AnimationNodeStateMachine:
-			if np.get_name(idx) == &"conditions":
+			if np.get_name(idx) == &"conditions" or not node.has_node(np.get_name(idx)):
 				return null
 			node = node.get_node(np.get_name(idx))
 		elif node is AnimationNodeBlendSpace1D:
